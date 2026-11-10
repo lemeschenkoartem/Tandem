@@ -11,6 +11,8 @@ let powerBlocker;
 let sessions;
 let local;
 let servicePromise;
+let logger, logError = null, quitting = false;
+const friendlyError = require('./logging.js').error;
 async function serviceConfiguration() {
   if (servicePromise) return servicePromise;
   servicePromise = (async () => {
@@ -40,6 +42,7 @@ async function serviceConfiguration() {
   return servicePromise;
 }
 function revoke(notify = true) {
+  if (granted) logger?.record('control', { result: 'Удалённое управление отозвано; нажатия отпущены' });
   granted = false; input?.release();
   if (notify && win && !win.isDestroyed()) win.webContents.send('control-revoked');
 }
@@ -57,7 +60,14 @@ function registerIPC() {
     const addresses = networkAddresses();
     const server = await serviceConfiguration(), cachedAccount = local.read('account.json');
     const lastAccount = cachedAccount && /^[a-f0-9]{32}$/.test(cachedAccount.network) && /^[0-9]{8}$/.test(cachedAccount.id) ? cachedAccount : null;
-    return { platform: process.platform, version: app.getVersion(), addresses, defaultServer: server, serviceConfigured: Boolean(server), dataDirectory: app.getPath('userData'), lastAccount, emergencyShortcutAvailable, gpu: app.getGPUFeatureStatus() };
+    return { platform: process.platform, version: app.getVersion(), addresses, defaultServer: server, serviceConfigured: Boolean(server), dataDirectory: app.getPath('userData'), logPath: logger?.filename, logError, lastAccount, emergencyShortcutAvailable, gpu: app.getGPUFeatureStatus() };
+  });
+  ipcMain.handle('log-event', (event, name, data) => { trusted(event); if (!logger) return false; logger.record(name, data); return true; });
+  ipcMain.handle('open-log', async event => {
+    trusted(event);
+    if (!logger) throw new Error('Журнал недоступен: ' + (logError || 'не удалось создать файл'));
+    await logger.flush(); if (logger.error) throw new Error('Не удалось записать журнал. Код: ' + logger.error);
+    const result = await shell.openPath(logger.filename); if (result) throw new Error('Не удалось открыть журнал. Откройте файл через папку данных.'); return true;
   });
   ipcMain.handle('load-settings', event => { trusted(event); return local.settings(); });
   ipcMain.handle('save-settings', (event, value) => { trusted(event); return local.settings(value); });
@@ -80,7 +90,7 @@ function registerIPC() {
     if (typeof packet !== 'string' || packet.length > 262144 || !packet.startsWith('tandem://direct/')) throw new Error('Некорректное приглашение.');
     const result = await dialog.showSaveDialog(win, { title: 'Сохранить приглашение прямой связи', defaultPath: 'Tandem-connection.tandem', filters: [{ name: 'Tandem', extensions: ['tandem'] }] });
     if (result.canceled) return false;
-    fs.writeFileSync(result.filePath, packet, 'utf8'); return true;
+    fs.writeFileSync(result.filePath, packet, 'utf8'); logger?.record('action', { action: 'Файл приглашения или ответа сохранён' }); return true;
   });
   ipcMain.handle('sources', async event => {
     trusted(event);
@@ -100,6 +110,7 @@ function registerIPC() {
     const display = screen.getAllDisplays().find(d => String(d.id) === source.display_id);
     if (!display) throw new Error('Не удалось определить монитор.');
     selected = { id, displayId: display.id };
+    logger?.record('action', { action: 'Выбран монитор для показа', resolution: `${Math.round(display.size.width * display.scaleFactor)}x${Math.round(display.size.height * display.scaleFactor)}`, fps: display.displayFrequency });
     if (powerBlocker === undefined) powerBlocker = powerSaveBlocker.start('prevent-app-suspension');
     return true;
   });
@@ -120,7 +131,7 @@ function registerIPC() {
     if (!selected) throw new Error('Сначала выберите экран.');
     if (!emergencyShortcutAvailable) throw new Error('Ctrl+Alt+F12 занята другой программой. Освободите сочетание и перезапустите Tandem.');
     input ??= new (require('./windows-input.cjs').WindowsInput)();
-    lastHeartbeat = Date.now(); granted = true;
+    lastHeartbeat = Date.now(); granted = true; logger?.record('control', { result: 'Владелец разрешил клавиатуру и мышь' });
     return true;
   });
   ipcMain.handle('revoke-control', event => { trusted(event); revoke(false); return true; });
@@ -159,6 +170,8 @@ app.whenReady().then(() => {
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
   sessions = new (require('./session-store.cjs').SessionStore)(path.join(app.getPath('userData'), 'sessions.enc'), safeStorage);
   local = new (require('./local-store.cjs').LocalStore)(app.getPath('userData'));
+  try { logger = new (require('./logger.cjs').Logger)(path.join(app.getPath('userData'), 'logs', 'tandem.log')); logger.record('start', { version: app.getVersion(), platform: process.platform }); }
+  catch (error) { logError = error.code || 'LOG_CREATE_FAILED'; }
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(wc === win?.webContents && ['media', 'display-capture', 'fullscreen', 'pointerLock'].includes(permission)));
   session.defaultSession.setPermissionCheckHandler((wc, permission) => wc === win?.webContents && ['media', 'display-capture', 'fullscreen', 'pointerLock'].includes(permission));
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
@@ -179,7 +192,7 @@ app.whenReady().then(() => {
   win.webContents.on('before-input-event', (event, key) => {
     if (key.type === 'keyDown' && key.control && !key.alt && key.code === 'F12') { event.preventDefault(); win.webContents.send('exit-fullscreen'); }
   });
-  win.webContents.on('render-process-gone', () => revoke(false));
+  win.webContents.on('render-process-gone', (_event, details) => { logger?.record('crash', { reason: 'Закрылся процесс интерфейса', code: details.exitCode }); revoke(false); });
   win.on('closed', () => { revoke(false); win = null; });
   emergencyShortcutAvailable = globalShortcut.register('CommandOrControl+Alt+F12', () => { revoke(); win?.show(); win?.focus(); });
   registerIPC();
@@ -189,5 +202,9 @@ app.whenReady().then(() => {
   screen.on('display-removed', () => revoke());
 });
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', () => { revoke(false); globalShortcut.unregisterAll(); relay?.close(); });
-process.on('uncaughtException', error => { revoke(false); console.error(error.message); app.quit(); });
+app.on('before-quit', event => {
+  if (quitting) return;
+  event.preventDefault(); quitting = true; revoke(false); globalShortcut.unregisterAll(); logger?.record('stop');
+  Promise.allSettled([logger?.close(), relay?.close()]).finally(() => app.quit());
+});
+process.on('uncaughtException', error => { logger?.record('crash', { reason: friendlyError(error), code: error.code || error.name }); revoke(false); console.error(error.message); app.quit(); });

@@ -5,15 +5,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { createRelay } = require('../server/relay.cjs');
+const { Logger } = require('../app/logger.cjs');
 const { LocalStore } = require('../app/local-store.cjs');
 const { validateInput } = require('../shared/input.cjs');
 const root = path.join(__dirname, '..');
-const inputs = [], errors = [], traces = [], pages = [];
+const inputs = [], errors = [], traces = [], pages = [], loggers = [];
 let hostGranted = false, guestGranted = false;
 const relay = createRelay({ port: 0, host: '127.0.0.1' });
 const dataDirectory = fs.mkdtempSync('/tmp/tandem-browser-');
 const staticServer = http.createServer((req, res) => {
-  const file = { '/': 'index.html', '/renderer.js': 'renderer.js', '/network.js': 'network.js', '/quality.js': 'quality.js', '/adaptive.js': 'adaptive.js', '/player.js': 'player.js', '/styles.css': 'styles.css' }[req.url];
+  const file = { '/': 'index.html', '/renderer.js': 'renderer.js', '/network.js': 'network.js', '/logging.js': 'logging.js', '/quality.js': 'quality.js', '/adaptive.js': 'adaptive.js', '/player.js': 'player.js', '/styles.css': 'styles.css' }[req.url];
   if (req.url === '/favicon.ico') { res.writeHead(204); res.end(); return; }
   if (!file) { res.writeHead(404); res.end(); return; }
   res.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
@@ -22,8 +23,10 @@ const staticServer = http.createServer((req, res) => {
 let browser;
 async function setupContext(name, defaultServer) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  const savedSessions = new Map(); let lastSaved = null; const local = new LocalStore(path.join(dataDirectory, name));
+  const savedSessions = new Map(); let lastSaved = null; const local = new LocalStore(path.join(dataDirectory, name)); const logger = new Logger(path.join(dataDirectory, name, 'logs', 'tandem.log')); loggers.push(logger);
   await context.exposeBinding('nativeAction', async (_, action, value) => {
+    if (action === 'log') { logger.record(value.event, value.data); return true; }
+    if (action === 'open-log') { await logger.flush(); return fs.readFileSync(logger.filename, 'utf8'); }
     if (action === 'load-settings') { const saved = local.settings(); return saved ? { ...saved, ice: JSON.parse(process.env.TANDEM_TEST_ICE || '[]') } : null; }
     if (action === 'save-settings') return local.settings(value);
     if (action === 'load-contacts') return local.contacts(value.network, value.id);
@@ -43,6 +46,8 @@ async function setupContext(name, defaultServer) {
     const png = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#554477"/></svg>');
     window.tandem = {
       environment: async () => ({ platform: 'win32', version: 'test', addresses: ['127.0.0.1'], defaultServer, emergencyShortcutAvailable: true }),
+      logEvent: (event, data) => window.nativeAction('log', { event, data }),
+      openLog: () => window.nativeAction('open-log'),
       loadSettings: () => window.nativeAction('load-settings'),
       saveSettings: value => window.nativeAction('save-settings', value),
       loadContacts: (network, id) => window.nativeAction('load-contacts', { network, id }),
@@ -179,6 +184,11 @@ async function connectFriend(guest, host, accept = true) {
   await saveProfile(host, { resolution: '3840x2160', fps: '240' });
   assert.equal(await host.textContent('#profile-title'), '4K / 240 FPS');
   await saveProfile(host); await host.click('[data-view="friends"]'); await host.screenshot({ path: path.join(root, 'artifacts', 'home.png'), fullPage: true });
+  // Probe a real TURN allocation, then force the entire fallback session through TURN.
+  await host.click('[data-view="settings"]'); await host.selectOption('#transport', 'relay'); await host.click('#test-turn');
+  await host.waitForFunction(() => document.getElementById('turn-result').textContent.includes('TURN доступен'), { timeout: 20000 });
+  await host.click('#save-settings'); await host.locator('#confirm-dialog').waitFor({ state: 'visible' }); await host.click('#confirm-yes');
+  await guest.click('[data-view="settings"]'); await guest.selectOption('#transport', 'relay'); await guest.click('#save-settings'); await guest.locator('#confirm-dialog').waitFor({ state: 'visible' }); await guest.click('#confirm-yes');
   // Fallback direct files work without a guest account, with an explicit owner confirmation.
   await guest.click('[data-view="accounts"]'); await guest.click('#account-logout'); await guest.reload(); assert.equal(await guest.textContent('#own-id'), '—');
   await host.click('[data-view="session"]'); await host.locator('#connection-idle details summary').click(); await host.click('#create'); await host.locator('.source-choice').click();
@@ -189,9 +199,13 @@ async function connectFriend(guest, host, accept = true) {
   await guest.waitForFunction(() => document.getElementById('direct-output').value.startsWith('tandem://direct/'));
   const answer = await guest.inputValue('#direct-output'); await host.fill('#direct-response', answer); await host.click('#direct-apply'); await host.locator('#confirm-dialog').waitFor({ state: 'visible' }); await host.click('#confirm-yes'); await waitVideo(guest);
   assert.equal(await guest.locator('#auth-dialog').isVisible(), false); await guest.click('#leave'); await host.locator('#connection-idle').waitFor({ state: 'visible' });
+  for (const logger of loggers) await logger.flush();
+  const logText = fs.readFileSync(loggers[0].filename, 'utf8');
+  assert.match(logText, /TURN доступен и выделил маршрут/); assert.match(logText, /Ответ друга применён/);
+  assert.ok(!logText.includes('tandem:\/\/direct\/')); assert.ok(!logText.includes('test-local-only')); assert.ok(logText.endsWith('\n'));
   assert.deepEqual(errors, []); assert.deepEqual(traces, []);
-  const report = { ok: true, tested: ['no host/IP fields in the normal interface', 'account ID search without repeated login', 'friend request, explicit acceptance and local JSON persistence across restart', 'view request rejection and retry without pre-creating a room', 'actual 1080p video and input after separate owner approvals', 'fullscreen edges, Ctrl+F12 and owner emergency revoke', 'live manual HD/20Mbps update with owner consent', 'adaptive congestion reduction and gradual recovery on a real sender using injected RTT stats', 'auto changes preserve the saved user ceiling', 'fresh decoder feedback over data channel', 'established game survives signaling loss and supports role swap', 'both users can host and control', '4K/240 limits and settings confirmation', 'direct offer/answer file fallback without guest account'], inputEvents: inputs.length, browserErrors: errors, consoleErrors: traces };
+  const report = { ok: true, tested: ['no host/IP fields in the normal interface', 'account ID search without repeated login', 'friend request, explicit acceptance and local JSON persistence across restart', 'view request rejection and retry without pre-creating a room', 'actual 1080p video and input after separate owner approvals', 'fullscreen edges, Ctrl+F12 and owner emergency revoke', 'live manual HD/20Mbps update with owner consent', 'adaptive congestion reduction and gradual recovery on a real sender using injected RTT stats', 'auto changes preserve the saved user ceiling', 'fresh decoder feedback over data channel', 'established game survives signaling loss and supports role swap', 'both users can host and control', '4K/240 limits and settings confirmation', 'direct offer/answer file fallback without guest account', 'TURN allocation probe and forced relay policy', 'readable local logs without credentials or full invitations'], inputEvents: inputs.length, browserErrors: errors, consoleErrors: traces };
   fs.writeFileSync(path.join(root, 'artifacts', 'browser-test.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report, null, 2));
 })().catch(async error => { console.error(error); console.error({ errors, traces }); for (const page of pages) { try { console.error(await page.evaluate(() => ({status: document.getElementById('status').textContent, toast: document.getElementById('toast').textContent, role, peerReady, pc: pc?.connectionState, signal: pc?.signalingState, ice: pc?.iceConnectionState, v: {w: document.getElementById('video').videoWidth,h: document.getElementById('video').videoHeight,t: document.getElementById('video').currentTime}, stream: stream?.getTracks().map(t=>t.getSettings()), stats: document.getElementById('metrics-detail').textContent}))); } catch {} } process.exitCode = 1; }).finally(async () => {
-  await browser?.close(); await relay.close(); fs.rmSync(dataDirectory, { recursive: true, force: true }); await new Promise(resolve => staticServer.close(resolve));
+  await browser?.close(); await relay.close(); for (const logger of loggers) await logger.close(); fs.rmSync(dataDirectory, { recursive: true, force: true }); await new Promise(resolve => staticServer.close(resolve));
 });

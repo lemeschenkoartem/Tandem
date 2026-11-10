@@ -2,6 +2,26 @@
 // Shared invitation format. Contains only a server address, public ID and network ID.
 // No password, session token or TURN credentials are included.
 (() => {
+  function iceConfiguration(servers, mode = 'auto') {
+    if (!Array.isArray(servers) || servers.length > 8 || !['auto', 'relay'].includes(mode)) throw new Error('Проверьте список ICE-серверов и режим соединения.');
+    let turns = 0;
+    const iceServers = servers.map(server => {
+      if (!server || typeof server !== 'object') throw new Error('Каждый ICE-сервер должен быть объектом с адресом urls.');
+      const urls = typeof server.urls === 'string' ? [server.urls] : server.urls;
+      if (!Array.isArray(urls) || !urls.length || urls.length > 8) throw new Error('У ICE-сервера должен быть хотя бы один адрес urls.');
+      for (const value of urls) {
+        if (typeof value !== 'string' || value.length > 2048 || !/^(?:stun|stuns|turn|turns):(?:\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d{1,5})?(?:\?transport=(?:udp|tcp))?$/i.test(value)) throw new Error('Адрес ICE-сервера должен начинаться с stun:, turn: или turns:. Проверьте адрес и порт.');
+      }
+      if (urls.some(url => /^turns?:/i.test(url))) {
+        turns++;
+        if (typeof server.username !== 'string' || !server.username || server.username.length > 1024 || typeof server.credential !== 'string' || !server.credential || server.credential.length > 2048) throw new Error('Для TURN нужны username и credential из панели провайдера. Обычный пароль аккаунта провайдера сюда не подходит.');
+        return { urls, username: server.username, credential: server.credential };
+      }
+      return { urls };
+    });
+    if (mode === 'relay' && !turns) throw new Error('Выбран режим «Только TURN», но TURN-сервер ещё не задан. Добавьте адрес, username и credential.');
+    return { iceServers, iceTransportPolicy: mode === 'relay' ? 'relay' : 'all', bundlePolicy: 'max-bundle' };
+  }
   function normalizeServer(value) {
     let url;
     try { url = new URL(value); } catch { throw new Error('Укажите адрес сервера: ws://IP:8787 или wss://домен.'); }
@@ -55,7 +75,7 @@
       return !vpn(parts[4]) && !(related >= 0 && vpn(parts[related + 1]));
     }).join('\r\n');
   }
-  const exported = { normalizeServer, createInvitation, parseTarget, createDirectPacket, parseDirectPacket, withoutVPN };
+  const exported = { normalizeServer, createInvitation, parseTarget, createDirectPacket, parseDirectPacket, withoutVPN, iceConfiguration };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else globalThis.TandemNetwork = exported;
 })();

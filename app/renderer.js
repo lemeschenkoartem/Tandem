@@ -12,18 +12,22 @@ let serverIdentity = null, foundFriend = null, pendingLookup = null, endingSessi
 let runtimeProfile = null, adaptive = null, receiverStats = null, receiverStatsAt = 0, qualityEpoch = '', statsBusy = false, qualityBusy = false, remoteCodecs = null, codecProbeAttempted = false;
 const sourceLimits = new WeakMap();
 let adaptiveRetryAt = 0, qualityChanges = [];
+let metricLogAt = 0;
 let contacts = { friends: [], incoming: [], outgoing: [] }, contactsOwner = null;
 const { normalizeServer: validateServer, createDirectPacket, parseDirectPacket, withoutVPN } = globalThis.TandemNetwork;
-const defaults = { resolution: '1920x1080', fps: 120, bitrate: 60, codec: 'auto', qualityMode: 'adaptive', minResolution: '1920x1080', audio: true, embedded: false, mouseMode: 'game', hideCursor: true, ice: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const defaults = { resolution: '1920x1080', fps: 120, bitrate: 60, codec: 'auto', qualityMode: 'adaptive', minResolution: '1920x1080', transport: 'auto', audio: true, embedded: false, mouseMode: 'game', hideCursor: true, ice: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
+function logEvent(event, data = {}) { api?.logEvent?.(event, data)?.catch(() => {}); }
+function reportError(error) { const reason = TandemLog.error(error); logEvent('error', { reason, code: error?.code || error?.name || 'Error' }); toast(reason); }
 function toast(message, persist = false) {
   $('toast').textContent = String(message).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
   $('toast').hidden = false; clearTimeout(toastTimer);
   if (!persist) toastTimer = setTimeout(() => { $('toast').hidden = true; }, 7000);
 }
-function run(fn) { return (...args) => Promise.resolve().then(() => fn(...args)).catch(error => toast(error.message)); }
+function run(fn) { return (...args) => Promise.resolve().then(() => fn(...args)).catch(reportError); }
 function status(text, active = false) { $('status').textContent = text; $('status-dot').classList.toggle('live', active); }
 function view(name) {
+  logEvent('view', { section: ({session:'Игра и экран',friends:'Друзья',settings:'Качество и сеть',accounts:'Мой аккаунт',guide:'Как играть'})[name] || 'Другой раздел' });
   document.querySelectorAll('.view').forEach(el => { el.hidden = el.id !== `view-${name}`; });
   document.querySelectorAll('[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === name));
 }
@@ -32,12 +36,13 @@ function refreshProfile() {
   $('profile-title').textContent = `${settings.qualityMode === 'adaptive' ? 'Авто · ' : ''}${names[settings.resolution]} / ${settings.fps} FPS`;
 }
 function readSettings() {
-  const ice = JSON.parse($('ice').value);
+  let ice; try { ice = JSON.parse($('ice').value); } catch { throw new Error('В поле ICE-серверов неверный JSON. Вставьте массив iceServers целиком, включая квадратные скобки.'); }
+  TandemNetwork.iceConfiguration(ice, $('transport').value);
   if (!Array.isArray(ice) || ice.length > 8 || ice.some(s => !s || typeof s !== 'object' || !(typeof s.urls === 'string' || Array.isArray(s.urls)))) throw new Error('ICE-серверы: ожидается массив объектов с полем urls.');
   const bitrate = Number($('bitrate').value), fps = Number($('fps').value), resolution = $('resolution').value;
   if (!Number.isFinite(bitrate) || bitrate < 5 || bitrate > 250) throw new Error('Битрейт: от 5 до 250 Мбит/с.');
   if (![60, 90, 120, 144, 165, 240].includes(fps) || !['1280x720', '1920x1080', '2560x1440', '3840x2160'].includes(resolution)) throw new Error('Некорректный профиль.');
-  return { ...TandemQuality.profile({ resolution, fps, bitrate, codec: $('codec').value, qualityMode: $('quality-mode').value, minResolution: $('min-resolution').value }), audio: $('audio').checked, embedded: false, mouseMode: $('mouse-mode').value, hideCursor: $('hide-cursor').checked, server: settings.server, ice };
+  return { ...TandemQuality.profile({ resolution, fps, bitrate, codec: $('codec').value, qualityMode: $('quality-mode').value, minResolution: $('min-resolution').value }), audio: $('audio').checked, embedded: false, mouseMode: $('mouse-mode').value, hideCursor: $('hide-cursor').checked, server: settings.server, transport: $('transport').value, ice };
 }
 async function persistSettings() {
   const safe = { ...settings, ice: settings.ice.filter(s => !s.credential && !s.username) };
@@ -49,6 +54,7 @@ async function commitSettings() {
   const next = readSettings();
   if (roomReady && ws && next.server !== validateServer(ws.url)) throw new Error('Сначала завершите подключение, затем меняйте сервер сети.');
   settings = next; await persistSettings();
+  logEvent('settings', { resolution: next.resolution, fps: next.fps, bitrate: next.bitrate, codec: next.codec, mode: next.qualityMode === 'adaptive' ? 'Автоподбор' : 'Ручной', route: next.transport === 'relay' ? 'Только TURN' : 'Авто', count: next.ice.length });
   $('settings-result').textContent = 'Настройки сохранены.'; player?.refresh();
 }
 async function saveSettings() {
@@ -189,11 +195,12 @@ async function copyInvitation() {
 }
 function showSettings() {
   for (const id of ['resolution', 'fps', 'bitrate', 'codec']) $(id).value = settings[id];
+  $('transport').value = settings.transport || 'auto';
   $('quality-mode').value = settings.qualityMode; $('min-resolution').value = settings.minResolution;
   $('mouse-mode').value = settings.mouseMode || 'game'; $('hide-cursor').checked = settings.hideCursor !== false;
   $('audio').checked = settings.audio; $('ice').value = JSON.stringify(settings.ice, null, 2); refreshProfile();
 }
-function send(message) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('Нет соединения с сервером.'); ws.send(JSON.stringify(message)); }
+function send(message) { if (message.type !== 'signal') logEvent('action', { action: 'Отправлен запрос службе аккаунтов', kind: ({register:'Регистрация',login:'Вход',resume:'Восстановление входа','friend-request':'Заявка в друзья','friend-accept':'Принятие дружбы','friend-decline':'Отклонение дружбы','friend-remove':'Удаление друга',watch:'Запрос просмотра','contacts-sync':'Обновление друзей',logout:'Выход',leave:'Завершение сессии'})[message.type] || 'Служебное обновление' }); if (ws?.readyState !== WebSocket.OPEN) throw new Error('Нет соединения с сервером.'); ws.send(JSON.stringify(message)); }
 function dataSend(message, channel = reliable) {
   if (channel?.readyState === 'open' && channel.bufferedAmount < 65536) channel.send(JSON.stringify(message));
 }
@@ -202,9 +209,10 @@ function confirmation(title, description, accept = 'Разрешить') {
   $('confirm-title').textContent = title; $('confirm-description').textContent = description; $('confirm-yes').textContent = accept;
   $('confirm-dialog').showModal(); return new Promise(resolve => { confirmResolve = resolve; });
 }
-function finishConfirmation(value) { $('confirm-dialog').close(); const resolve = confirmResolve; confirmResolve = null; resolve?.(value); }
+function finishConfirmation(value) { logEvent('consent', { action: $('confirm-title').textContent, result: value ? 'Разрешено' : 'Отклонено' }); $('confirm-dialog').close(); const resolve = confirmResolve; confirmResolve = null; resolve?.(value); }
 function cancelSource() { $('source-dialog').close(); sourceReject?.(new Error('Выбор экрана отменён.')); sourceReject = sourceResolve = null; }
 async function chooseCapture() {
+  logEvent('action', { action: 'Открыт выбор монитора' });
   const sources = await api.sources();
   if (!sources.length) throw new Error('Не найдено доступных мониторов.');
   $('source-list').replaceChildren();
@@ -233,6 +241,7 @@ async function chooseCapture() {
   try { await track.applyConstraints(options.video); } catch { toast('Захват использует ближайший доступный режим. Проверьте фактические параметры.'); }
   track.onended = () => { if (stream === captured) run(endSession)('Трансляция экрана завершена.'); };
   if (settings.audio && !captured.getAudioTracks().length) toast('Источник не предоставил системный звук.');
+  logEvent('capture', { resolution: `${track.getSettings().width}x${track.getSettings().height}`, fps: track.getSettings().frameRate, result: captured.getAudioTracks().length ? 'Со звуком' : 'Без звука' });
   return captured;
 }
 function showVideo(media, local) {
@@ -275,6 +284,7 @@ function configureChannel(channel) {
 }
 async function handleData(message) {
   if (!message || typeof message !== 'object') return;
+  if (['control-request','control-granted','control-denied','control-revoked','swap-request','swap-accepted','swap-rejected'].includes(message.type)) logEvent(message.type.startsWith('swap') ? 'swap' : 'control', { result: ({'control-request':'Друг запросил управление','control-granted':'Владелец разрешил управление','control-denied':'Владелец отклонил управление','control-revoked':'Управление возвращено владельцу','swap-request':'Друг предложил сменить роли','swap-accepted':'Смена ролей разрешена','swap-rejected':'Смена ролей отклонена'})[message.type] });
   if (message.type === 'signal' && peerReady) { signalQueue = signalQueue.then(() => handleSignal(message.data)).catch(error => run(endSession)(error.message)); return; }
   if (message.type === 'end' && peerReady) { await endSession('Друг завершил сессию.'); return; }
   if (message.type === 'cursor-state') { player?.hostCursor(message.visible); return; }
@@ -323,9 +333,13 @@ async function handleData(message) {
   } else if (message.type === 'swap-rejected') { stopStream(pendingStream); pendingStream = null; toast('Друг пока продолжает свою трансляцию.'); }
 }
 function makePeer() {
-  pc = new RTCPeerConnection({ iceServers: settings.ice, bundlePolicy: 'max-bundle' });
+  pc = new RTCPeerConnection(TandemNetwork.iceConfiguration(settings.ice, settings.transport || 'auto'));
+  logEvent('action', { action: 'Создано соединение WebRTC', mode: settings.transport === 'relay' ? 'Только TURN' : 'Авто', count: settings.ice.length });
   const current = pc;
-  pc.onicecandidate = event => { if (event.candidate && pc === current) { try { sendSignal({ kind: 'ice', candidate: event.candidate.toJSON() }); } catch {} } };
+  pc.onicecandidateerror = event => logEvent('ice_error', { code: event.errorCode, reason: TandemLog.iceError(event.errorCode), server: safeIceUrl(event.url) });
+  pc.oniceconnectionstatechange = () => { if (pc === current) logEvent('ice_state', { state: connectionState(current.iceConnectionState) }); };
+  pc.onicegatheringstatechange = () => { if (pc === current) logEvent('ice_state', { state: ({new:'Поиск маршрутов ещё не начался',gathering:'Идёт поиск маршрутов',complete:'Поиск маршрутов завершён'})[current.iceGatheringState] }); };
+  pc.onicecandidate = event => { if (event.candidate && pc === current) { logCandidate(event.candidate); try { sendSignal({ kind: 'ice', candidate: event.candidate.toJSON() }); } catch {} } };
   pc.ondatachannel = event => configureChannel(event.channel);
   pc.ontrack = event => {
     if (!remoteMedia.getTracks().some(t => t.id === event.track.id)) remoteMedia.addTrack(event.track);
@@ -338,9 +352,13 @@ function makePeer() {
   };
   pc.onconnectionstatechange = () => {
     if (pc !== current) return;
+    logEvent('peer_state', { state: connectionState(pc.connectionState) });
     if (['connected', 'failed', 'disconnected'].includes(pc.connectionState)) clearTimeout(disconnectTimer);
-    if (pc.connectionState === 'connected') { status(directState ? 'Прямая сессия установлена' : 'Вы в одной сети', true); startStats(); }
-    else if (pc.connectionState === 'failed') { run(endSession)('Прямое соединение не удалось. Проверьте Tailscale или настройте TURN в разделе «Качество и сеть».'); }
+    if (pc.connectionState === 'connected') { logEvent('connected', { mode: settings.transport === 'relay' ? 'Только TURN' : 'Авто' }); status(directState ? 'Прямая сессия установлена' : 'Вы в одной сети', true); startStats(); }
+    else if (pc.connectionState === 'failed') {
+      const reason = directState && owner && !pc.remoteDescription ? 'Ответ друга ещё не применён. Создайте новое приглашение и завершите обмен ответом.' : directState && !owner ? 'Связь не установилась. Проверьте, что владелец применил ваш ответ, и проверьте TURN на обоих ПК.' : 'Сетевой маршрут не установился. Проверьте TURN на обоих ПК и откройте журнал.';
+      logEvent('error', { phase: directState ? 'Прямое приглашение' : 'Соединение с другом', reason }); run(endSession)(reason);
+    }
     else if (pc.connectionState === 'disconnected') {
       run(revokeControl)(false); status('Соединение прервано…');
       disconnectTimer = setTimeout(() => run(endSession)('Соединение потеряно. Подключитесь заново.'), 8000);
@@ -351,8 +369,45 @@ function makePeer() {
     configureChannel(pc.createDataChannel('control', { ordered: true }));
     configureChannel(pc.createDataChannel('pointer', { ordered: false, maxRetransmits: 0 }));
   }
-  disconnectTimer = setTimeout(() => { if (pc === current && pc.connectionState !== 'connected') run(endSession)(directState ? 'Прямая связь не установилась. Проверьте обмен ответом; для сложного NAT нужен TURN.' : 'Не удалось установить видеосоединение за 25 секунд. Проверьте сетевой путь и ICE-серверы.'); }, directState ? 180000 : 25000);
+  connectionTimeout(current, directState ? 15 * 60 * 1000 : 25000, Boolean(directState));
   return pc;
+}
+function safeIceUrl(value) {
+  const match = typeof value === 'string' && value.match(/^(stuns?|turns?):(?:\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d+)?/i);
+  return match ? match[0] : 'Настроенный ICE-сервер';
+}
+function connectionState(value) {
+  return ({ new: 'Ожидаем начала соединения', checking: 'Проверяем доступные маршруты', connecting: 'Устанавливаем защищённое соединение', connected: 'Связь установлена', completed: 'Рабочий маршрут выбран', disconnected: 'Связь временно прервалась', failed: 'Рабочий маршрут установить не удалось', closed: 'Соединение закрыто' })[value] || 'Обновление состояния';
+}
+function logCandidate(candidate) {
+  logEvent('ice_candidate', { kind: ({ host: 'Локальный маршрут', srflx: 'Внешний маршрут через STUN', prflx: 'Маршрут, обнаруженный вторым участником', relay: 'Маршрут через TURN' })[candidate.type] || 'Сетевой маршрут', mode: candidate.protocol || 'Транспорт не сообщён' });
+}
+function connectionTimeout(peer, delay, exchange) {
+  clearTimeout(disconnectTimer);
+  disconnectTimer = setTimeout(() => {
+    if (pc !== peer || peer.connectionState === 'connected') return;
+    const message = exchange ? 'Истекло время обмена приглашением и ответом. Создайте новые файлы и примените ответ у владельца. Причину NAT на этом этапе определить нельзя.' : 'Ответ применён, но связь не установилась. Проверьте TURN кнопкой «Проверить TURN» и откройте журнал.';
+    logEvent(exchange ? 'wait_expired' : 'connect_timeout', { phase: exchange ? 'Обмен файлами' : 'Установка соединения', reason: message });
+    run(endSession)(message);
+  }, delay);
+}
+function updateJoinLabel() { $('join').textContent = $('invite-input').value.trim().startsWith('tandem://direct/') ? 'Применить прямое приглашение' : 'Найти аккаунт'; }
+async function testTurn() {
+  if ($('test-turn').disabled) return;
+  let ice;
+  try { ice = JSON.parse($('ice').value); } catch { throw new Error('В поле ICE-серверов неверный JSON. Вставьте массив из панели провайдера.'); }
+  const config = TandemNetwork.iceConfiguration(ice, 'relay');
+  const probe = new RTCPeerConnection(config), failures = []; let candidates = 0, finish, timer;
+  $('test-turn').disabled = true; $('turn-result').textContent = 'Проверяем, может ли TURN выделить маршрут…'; logEvent('turn_start', { count: ice.length });
+  try {
+    const done = new Promise(resolve => { finish = resolve; timer = setTimeout(resolve, 15000); });
+    probe.onicecandidate = event => { if (event.candidate?.type === 'relay') { candidates++; logCandidate(event.candidate); finish(); } else if (!event.candidate) finish(); };
+    probe.onicecandidateerror = event => { failures.push(event.errorCode); logEvent('ice_error', { code: event.errorCode, reason: TandemLog.iceError(event.errorCode), server: safeIceUrl(event.url) }); };
+    probe.onicegatheringstatechange = () => { if (probe.iceGatheringState === 'complete') finish(); };
+    probe.createDataChannel('turn-check'); await probe.setLocalDescription(await probe.createOffer()); await done;
+    const reason = candidates ? 'TURN доступен: сервер выделил маршрут. Теперь сохраните настройки и создайте новое приглашение и новый ответ. Это проверка доступа к серверу, не измерение задержки игры.' : failures.length ? TandemLog.iceError(failures.at(-1)) : 'За 15 секунд TURN не выделил маршрут. Проверьте адрес, порт, username и credential.';
+    $('turn-result').textContent = reason; logEvent(candidates ? 'turn_ok' : 'turn_failed', { count: candidates, reason });
+  } finally { clearTimeout(timer); probe.close(); $('test-turn').disabled = false; }
 }
 async function attachTracks() {
   for (const track of stream.getTracks()) {
@@ -421,13 +476,15 @@ function waitIce(peer) {
 }
 function directOutput(kind) {
   const packet = createDirectPacket({ kind, session: directState.session, name: account?.name || (owner ? 'Владелец' : 'Друг'), sdp: withoutVPN(pc.localDescription.sdp) });
+  logEvent(kind === 'offer' ? 'direct_offer' : 'direct_answer');
   $('direct-output').value = packet; $('direct-exchange').hidden = false;
   $('direct-help').textContent = kind === 'offer' ? 'Отправьте приглашение другу (для мессенджера удобнее файл). Друг создаст ответ; вставьте его ниже или откройте файл ответа.' : 'Отправьте этот ответ владельцу. Он применит ответ и подтвердит подключение. VPN и общий сервер не нужны; при сложном NAT понадобится TURN.';
   for (const id of ['direct-response', 'direct-apply', 'direct-open-response']) $(id).hidden = kind !== 'offer';
 }
 async function createDirect() {
   if (busy || roomReady) return;
-  busy = true; buttonsBusy(true); owner = true; role = 'sender'; await commitSettings();
+  busy = true; buttonsBusy(true); owner = true; role = 'sender';
+  try { await commitSettings(); } catch (error) { busy = false; buttonsBusy(false); throw error; }
   directState = { session: Array.from(crypto.getRandomValues(new Uint8Array(16)), x => x.toString(16).padStart(2, '0')).join(''), connected: false };
   try {
     stream = await chooseCapture(); showVideo(stream, true); await makeOffer(true); await waitIce(pc);
@@ -439,7 +496,9 @@ async function importDirect(text) {
   const packet = parseDirectPacket(text);
   if (packet.kind === 'answer') return applyDirectAnswer(packet);
   if (roomReady || busy) throw new Error('Сначала завершите текущее подключение.');
-  busy = true; buttonsBusy(true); owner = false; role = 'viewer'; await commitSettings();
+  logEvent('direct_received', { kind: packet.kind === 'offer' ? 'Предложение просмотра' : 'Ответ' });
+  busy = true; buttonsBusy(true); owner = false; role = 'viewer';
+  try { await commitSettings(); } catch (error) { busy = false; buttonsBusy(false); throw error; }
   directState = { session: packet.session, connected: false }; peerReady = true; peerName = packet.name;
   try {
     makePeer(); await pc.setRemoteDescription({ type: 'offer', sdp: withoutVPN(packet.sdp) });
@@ -453,6 +512,7 @@ async function applyDirectAnswer(packet) {
   if (!await confirmation('Принять прямое подключение?', `Ответ от «${packet.name}». После принятия он увидит выбранный монитор. Управление разрешается отдельно.`, 'Принять')) return;
   peerName = packet.name; peerReady = true;
   await pc.setRemoteDescription({ type: 'answer', sdp: withoutVPN(packet.sdp) });
+  logEvent('direct_applied'); connectionTimeout(pc, 45000, false);
   $('peer-label').textContent = `Прямое соединение · ${peerName}`; updateControls();
 }
 async function tryResume() {
@@ -491,6 +551,7 @@ async function connect(url, expectedNetwork) {
   if (ws) await endSession(undefined, { disconnect: true });
   clearTimeout(reconnectTimer);
   account = null; serverIdentity = null; refreshAccount();
+  logEvent('server_state', { state: 'Подключаемся к общей службе' });
   const socket = new WebSocket(url); ws = socket;
   await new Promise((resolve, reject) => {
     let ready = false;
@@ -515,6 +576,7 @@ async function connect(url, expectedNetwork) {
     };
     socket.onclose = () => {
       clearTimeout(timer); if (ws !== socket) return;
+      logEvent('server_state', { state: 'Соединение со службой закрыто; готовый P2P-поток может продолжаться' });
       const goal = connectionGoal; ws = null; account = null; serverIdentity = null; refreshAccount();
       resumePending?.reject(new Error('Сервер отключился.'));
       reject(new Error('Соединение с сервером закрыто.'));
@@ -548,6 +610,7 @@ async function submitAuth(register) {
   } catch (error) { setAuthBusy(false); $('auth-result').textContent = error.message; }
 }
 async function handleServer(msg) {
+  if (!['contacts', 'signal'].includes(msg.type)) logEvent(msg.type === 'error' ? 'error' : msg.type === 'authenticated' ? 'authenticated' : 'server_event', { result: ({found:'Аккаунт найден',created:'Сессия создана','join-pending':'Запрос отправлен владельцу','watch-request':'Друг запросил просмотр','peer-joined':'Друг присоединился',joined:'Просмотр разрешён',rejected:'Просмотр отклонён','peer-left':'Друг отключился',ended:'Сессия закрыта службой'})[msg.type] || 'Служебный ответ', code: msg.code, reason: msg.type === 'error' ? TandemLog.error(msg.message) : undefined });
   if (msg.type === 'contacts') { await receiveContacts(msg); return; }
   if (msg.type === 'watch-request') {
     if (busy || roomReady || directState || stream) { send({ type: 'reject-peer' }); return; }
@@ -642,6 +705,7 @@ function endSession(message, options = {}) {
   return endingSession;
 }
 async function resetSession(message, { disconnect = false, notifyServer = true } = {}) {
+  logEvent('ended', { reason: message ? TandemLog.error(message) : 'Завершено пользователем или выполнен сброс сессии' });
   dataSend({ type: 'end' });
   directState = null; $('direct-exchange').hidden = true; $('direct-output').value = ''; $('direct-response').value = '';
   roomReady = peerReady = false; busy = false; controlling = remoteControl = false; hostTelemetry = null;
@@ -697,9 +761,9 @@ function startStats() {
         if (change) {
           try {
             if (await applyRuntime(change.profile) && pc === current && role === currentRole) {
-              adaptive.commit(change); qualityChanges.push({ ...change, at: Math.round(now) }); qualityChanges = qualityChanges.slice(-20);
+              adaptive.commit(change); logEvent('quality', { reason: change.reason, resolution: change.profile.resolution, fps: change.profile.fps, bitrate: change.profile.bitrate, codec: change.profile.codec }); qualityChanges.push({ ...change, at: Math.round(now) }); qualityChanges = qualityChanges.slice(-20);
             }
-          } catch (error) { adaptiveRetryAt = now + 15000; adaptive.reason = 'Режим не поддержан захватом; сохраняем предыдущий профиль'; console.warn('Adaptive profile:', error.message); }
+          } catch (error) { adaptiveRetryAt = now + 15000; adaptive.reason = 'Режим не поддержан захватом; сохраняем предыдущий профиль'; logEvent('warning', { reason: TandemLog.error(error), action: 'Автоподбор сохранил предыдущий режим' }); }
         }
         if (pc !== current || role !== currentRole) return;
         if (remoteCodecs && !codecProbeAttempted) await automaticCodec();
@@ -707,6 +771,7 @@ function startStats() {
       if (pc !== current || role !== currentRole) return;
       const target = runtimeProfile || settings;
       const telemetry = { codec: value.codec || '—', implementation: value.implementation || 'не сообщён', hardware: value.hardware, limitation: value.limitation, targetMbps: target.bitrate, ceilingMbps: settings.bitrate, actualMbps: Number((value.actualMbps || 0).toFixed(1)), fps: Math.round(value.fps || 0), resolution: `${value.width}x${value.height}`, processing, processingMs: value.processingMs, route: value.route, epoch: qualityEpoch, adaptive: Boolean(adaptive), autoReason: adaptive?.reason || 'Ручной профиль', profile: target };
+      if (now - metricLogAt >= 10000) { metricLogAt = now; logEvent('metrics', { role: role === 'sender' ? 'Передача' : 'Просмотр', route: value.route, codec: value.codec, resolution: `${value.width}x${value.height}`, fps: Math.round(value.fps || 0), bitrate: Number((value.actualMbps || 0).toFixed(1)) }); }
       diagnostics = { role, rttMs: value.rttMs, local: value, host: role === 'sender' ? telemetry : hostTelemetry, autoChanges: qualityChanges, receiverFeedbackAgeMs: receiverStats ? Math.round(now - receiverStatsAt) : null, gpu: env.gpu || {}, mouseLocked: Boolean(document.pointerLockElement) };
       if (role === 'sender') {
         dataSend({ type: 'host-telemetry', data: telemetry });
@@ -749,7 +814,7 @@ $('share-screen').onclick = run(async () => {
 $('mouse-lock').onclick = run(() => player.lock());
 $('fullscreen').onclick = run(() => player.fullscreen());
 $('sound').onclick = () => { $('video').muted = !$('video').muted; $('sound').textContent = $('video').muted ? 'Звук: выкл.' : 'Звук: вкл.'; };
-$('invite-input').addEventListener('input', () => { foundFriend = null; pendingLookup = null; $('connect-friend').hidden = $('add-friend').hidden = true; $('friend-result').textContent = ''; });
+$('invite-input').addEventListener('input', () => { updateJoinLabel(); foundFriend = null; pendingLookup = null; $('connect-friend').hidden = $('add-friend').hidden = true; $('friend-result').textContent = ''; });
 $('connect-friend').onclick = run(async () => {
   if (!foundFriend?.friend) throw new Error('Сначала добавьте пользователя в друзья.');
   await watchFriend(foundFriend.id);
@@ -758,6 +823,8 @@ $('add-friend').onclick = run(() => { if (foundFriend) { send({ type: 'friend-re
 $('open-friends').onclick = () => view('friends');
 $('find-account').onclick = run(async () => { const id = $('friend-id').value.trim(); view('session'); $('invite-input').value = id; await searchFriend(id); });
 $('refresh-friends').onclick = run(async () => { await ensureAuth(settings.server); send({ type: 'contacts-sync' }); });
+$('open-log').onclick = run(() => api.openLog?.());
+$('test-turn').onclick = run(testTurn);
 $('open-data-directory').onclick = run(() => api.openDataDirectory?.());
 $('account-login').onclick = run(async () => {
   if (roomReady) return;
@@ -772,15 +839,21 @@ $('direct-apply').onclick = run(() => importDirect($('direct-response').value.tr
 let responseFile = false;
 $('import-packet').onclick = () => { responseFile = false; $('packet-file').click(); };
 $('direct-open-response').onclick = () => { responseFile = true; $('packet-file').click(); };
-$('packet-file').onchange = run(async () => { const file = $('packet-file').files[0]; if (!file) return; if (file.size > 262144) throw new Error('Слишком большой файл приглашения.'); const text = (await file.text()).trim(); parseDirectPacket(text); if (responseFile) $('direct-response').value = text; else { $('invite-input').value = text; } $('packet-file').value = ''; });
+$('packet-file').onchange = run(async () => { const file = $('packet-file').files[0]; if (!file) return; if (file.size > 262144) throw new Error('Слишком большой файл приглашения.'); const text = (await file.text()).trim(); parseDirectPacket(text); if (responseFile) $('direct-response').value = text; else { $('invite-input').value = text; } $('packet-file').value = ''; logEvent('action', { action: 'Файл приглашения или ответа открыт', kind: responseFile ? 'Ответ' : 'Приглашение' }); updateJoinLabel(); });
 $('copy-diagnostics').onclick = run(async () => { await api.copy(JSON.stringify(diagnostics, null, 2)); toast('Диагностика скопирована.'); });
 for (const button of document.querySelectorAll('[data-preset]')) button.onclick = () => {
   const presets = { hd: ['1280x720', 120, 20, 'H264'], clear: ['1920x1080', 60, 45, 'H264'], fast: ['1920x1080', 120, 65, 'H264'], av1: ['1920x1080', 120, 45, 'AV1'] };
   const values = presets[button.dataset.preset]; ['resolution', 'fps', 'bitrate', 'codec'].forEach((id, i) => { $(id).value = values[i]; });
   $('settings-result').textContent = 'Профиль выбран. Нажмите «Сохранить настройки», чтобы применить.';
 };
-player = TandemPlayer.create({ state: () => ({ controlling, mode: settings?.mouseMode || 'game', hideCursor: settings?.hideCursor !== false }), input: inputEvent, motion: motionEvent, error: error => toast(error.message || error), nativeExit: () => api.exitFullscreen?.() });
+player = TandemPlayer.create({ state: () => ({ controlling, mode: settings?.mouseMode || 'game', hideCursor: settings?.hideCursor !== false }), input: inputEvent, motion: motionEvent, error: reportError, nativeExit: () => api.exitFullscreen?.() });
 window.addEventListener('beforeunload', () => { releaseKeys(); stopStream(stream); stopStream(pendingStream); });
+document.addEventListener('click', event => {
+  const button = event.target.closest?.('button, summary');
+  if (button) logEvent('action', { action: button.classList.contains('source-choice') ? 'Выбор монитора' : button.textContent.trim().replace(/\s+/g, ' ').slice(0, 100) });
+});
+window.addEventListener('error', event => logEvent('crash', { reason: TandemLog.error(event.error), code: event.error?.name || 'RendererError' }));
+window.addEventListener('unhandledrejection', event => logEvent('crash', { reason: TandemLog.error(event.reason), code: event.reason?.name || 'PromiseRejected' }));
 run(async () => {
   env = api ? await api.environment() : { defaultServer: 'ws://127.0.0.1:8787', platform: 'browser' };
   let saved = await api?.loadSettings?.();
@@ -789,12 +862,14 @@ run(async () => {
   settings = { ...defaults, ...saved, server: env.defaultServer, embedded: false };
   try { Object.assign(settings, TandemQuality.profile(settings)); } catch { Object.assign(settings, TandemQuality.profile(defaults)); }
   showSettings(); refreshAccount();
+  $('log-path').textContent = env.logPath || (env.logError ? 'Не удалось открыть журнал. Код: ' + env.logError : 'Журнал настольного клиента: logs/tandem.log');
+  logEvent('action', { action: 'Интерфейс готов', version: env.version });
   $('data-directory').textContent = env.dataDirectory || 'Локальная папка данных настольного клиента';
   if (env.lastAccount && api?.loadContacts) { contactsOwner = `${env.lastAccount.network}:${env.lastAccount.id}`; contacts = await api.loadContacts(env.lastAccount.network, env.lastAccount.id); renderContacts(); }
   if (!api) { status('Откройте настольный клиент для подключения'); return; }
   $('platform-label').textContent = env.platform === 'win32' ? 'Windows · клиент готов' : 'Предпросмотр · ввод только Windows';
   api.onRevoke(() => run(async () => { await revokeControl(); toast('Управление отозвано владельцем.'); })());
-  api.onError(message => toast(message, true)); api.onExitFullscreen?.(() => run(() => player.exitFullscreen())());
+  api.onError(message => { logEvent('error', { reason: TandemLog.error(message) }); toast(TandemLog.error(message), true); }); api.onExitFullscreen?.(() => run(() => player.exitFullscreen())());
   const network = remembered ? (remembered.server === settings.server ? remembered.network : null) : localStorage.getItem('tandem-last-network');
   if (network && await api.loadSession?.(network)) {
     try { await connect(settings.server, network); await tryResume(); } catch (error) { toast('Автовход: ' + error.message); }

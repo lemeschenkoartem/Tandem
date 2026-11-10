@@ -2,6 +2,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('tandem', {
   environment: () => ipcRenderer.invoke('environment'),
+  logEvent: (event, data) => ipcRenderer.invoke('log-event', event, data),
+  openLog: () => ipcRenderer.invoke('open-log'),
   loadSettings: () => ipcRenderer.invoke('load-settings'),
   saveSettings: value => ipcRenderer.invoke('save-settings', value),
   loadContacts: (network, id) => ipcRenderer.invoke('load-contacts', network, id),

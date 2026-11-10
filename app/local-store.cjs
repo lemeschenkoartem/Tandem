@@ -18,7 +18,7 @@ class LocalStore {
     if (value === undefined) return this.read('settings.json');
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Некорректные настройки.');
     const { profile } = require('./quality.js');
-    const safe = { ...profile(value), audio: value.audio !== false, mouseMode: value.mouseMode === 'desktop' ? 'desktop' : 'game', hideCursor: value.hideCursor !== false };
+    const safe = { ...profile(value), transport: value.transport === 'relay' ? 'relay' : 'auto', audio: value.audio !== false, mouseMode: value.mouseMode === 'desktop' ? 'desktop' : 'game', hideCursor: value.hideCursor !== false };
     // TURN credentials, passwords and session tokens never go into this JSON.
     safe.ice = Array.isArray(value.ice) ? value.ice.filter(s => s && !s.username && !s.credential).map(s => ({ urls: s.urls })).slice(0, 8) : [];
     return this.write('settings.json', safe);

@@ -13,6 +13,7 @@ app.on('browser-window-created', (_, window) => {
       const result = await window.webContents.executeJavaScript(`(async () => {
         const env = await window.tandem.environment();
         window.testNativeExitCount = 0; window.tandem.onExitFullscreen(() => { window.testNativeExitCount++; });
+        await window.tandem.logEvent('action', { action: 'Проверка настоящего IPC журнала' });
         await window.tandem.loadSession('a'.repeat(32));
         await window.tandem.saveSettings({ resolution: '1920x1080', fps: 120, bitrate: 60, codec: 'auto', qualityMode: 'adaptive', audio: false, ice: [] });
         if ((await window.tandem.loadSettings()).qualityMode !== 'adaptive') throw new Error('Native settings JSON roundtrip failed');
@@ -32,6 +33,8 @@ app.on('browser-window-created', (_, window) => {
       result.nativeFullscreenShortcut = await window.webContents.executeJavaScript('window.testNativeExitCount > 0');
       if (!result.nativeFullscreenShortcut) throw new Error('Native Ctrl+F12 shortcut did not reach renderer');
       if (!/^[0-9]{8}$/.test(result.account.id)) throw new Error('Invalid account ID');
+      if (!fs.existsSync(path.join(directory, 'logs', 'tandem.log'))) { await new Promise(resolve => setTimeout(resolve, 300)); }
+      if (!fs.readFileSync(path.join(directory, 'logs', 'tandem.log'), 'utf8').includes('Проверка настоящего IPC журнала')) throw new Error('Native logging IPC did not write the file');
       console.log('ELECTRON_SMOKE_OK ' + JSON.stringify(result));
       clearTimeout(timer); app.quit();
     } catch (error) { console.error(error); clearTimeout(timer); app.exit(1); }
