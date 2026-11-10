@@ -31,6 +31,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release upload v0.2.0 release-assets/Tandem-0.2.0-Windows-x64.zip release-assets/Tandem-0.2.0-start.txt release-assets/SHA256SUMS.txt --clobber
-          digest="$(gh api repos/$GH_REPO/releases/tags/v0.2.0 --jq '.assets[] | select(.name == "Tandem-0.2.0-Windows-x64.zip") | .digest')"
+          asset_api_url="$(gh release view v0.2.0 --json assets --jq '.assets[] | select(.name == "Tandem-0.2.0-Windows-x64.zip") | .apiUrl')"
+          digest="$(gh api "$asset_api_url" --jq '.digest')"
           test "$digest" = 'sha256:fd95985d5728fe330e49c4ff4332237946c0f091bd5758edb794cc03d3fb3c4d'
           gh release edit v0.2.0 --draft=false --prerelease
