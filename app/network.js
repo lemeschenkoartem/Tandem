@@ -32,7 +32,30 @@
     catch { throw new Error('Приглашение повреждено. Попросите друга скопировать его заново.'); }
     return validateInvitation(value);
   }
-  const exported = { normalizeServer, createInvitation, parseTarget };
+  function directPacket(value) {
+    if (!value || value.v !== 1 || !['offer', 'answer'].includes(value.kind) || !/^[a-f0-9]{32}$/.test(value.session) || typeof value.sdp !== 'string' || value.sdp.length > 98304 || !value.sdp.startsWith('v=0') || typeof value.name !== 'string' || value.name.length > 64) throw new Error('Некорректное приглашение прямой связи.');
+    return { v: 1, kind: value.kind, session: value.session, sdp: value.sdp, name: value.name };
+  }
+  function createDirectPacket(value) {
+    const bytes = new TextEncoder().encode(JSON.stringify(directPacket({ v: 1, ...value })));
+    return 'tandem://direct/' + btoa(Array.from(bytes, b => String.fromCharCode(b)).join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function parseDirectPacket(text) {
+    if (typeof text !== 'string' || text.length > 262144 || !text.startsWith('tandem://direct/')) throw new Error('Вставьте приглашение или ответ прямой связи целиком.');
+    try {
+      const raw = atob(text.slice('tandem://direct/'.length).replace(/-/g, '+').replace(/_/g, '/'));
+      return directPacket(JSON.parse(new TextDecoder().decode(Uint8Array.from(raw, c => c.charCodeAt(0)))));
+    } catch { throw new Error('Приглашение прямой связи повреждено.'); }
+  }
+  function withoutVPN(sdp) {
+    return sdp.split('\r\n').filter(line => {
+      if (!line.startsWith('a=candidate:')) return true;
+      const parts = line.split(' '), related = parts.indexOf('raddr');
+      const vpn = ip => /^26\./.test(ip || '') || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip || '');
+      return !vpn(parts[4]) && !(related >= 0 && vpn(parts[related + 1]));
+    }).join('\r\n');
+  }
+  const exported = { normalizeServer, createInvitation, parseTarget, createDirectPacket, parseDirectPacket, withoutVPN };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else globalThis.TandemNetwork = exported;
 })();

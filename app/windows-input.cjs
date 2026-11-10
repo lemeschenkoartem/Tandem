@@ -7,6 +7,7 @@ class WindowsInput {
     const user32 = koffi.load('user32.dll');
     this.sendInput = user32.func('uint32_t __stdcall SendInput(uint32_t count, const void *inputs, int size)');
     this.metric = user32.func('int __stdcall GetSystemMetrics(int index)');
+    this.getCursorInfo = user32.func('int __stdcall GetCursorInfo(void *info)');
     this.keys = new Set(); this.buttons = new Set();
   }
   submit(type, fields) {
@@ -32,14 +33,18 @@ class WindowsInput {
     const vx = this.metric(76), vy = this.metric(77), width = this.metric(78), height = this.metric(79);
     const nx = Math.round((x - vx) * 65535 / Math.max(1, width - 1));
     const ny = Math.round((y - vy) * 65535 / Math.max(1, height - 1));
-    this.submit(0, [[8, Math.max(0, Math.min(65535, nx)), true], [12, Math.max(0, Math.min(65535, ny)), true], [20, 0xc001]]);
+    this.submit(0, [[8, Math.max(0, Math.min(65535, nx)), true], [12, Math.max(0, Math.min(65535, ny)), true], [20, 0xe001]]);
   }
-  relative(dx, dy) { this.submit(0, [[8, dx, true], [12, dy, true], [20, 0x1]]); }
+  relative(dx, dy) { this.submit(0, [[8, dx, true], [12, dy, true], [20, 0x2001]]); }
   wheel(delta) { this.submit(0, [[16, delta], [20, 0x800]]); }
   release() {
     for (const scan of [...this.keys]) { try { this.key(scan, false); } catch {} }
     for (const button of [...this.buttons]) { try { this.button(button, false); } catch {} }
     this.keys.clear(); this.buttons.clear();
+  }
+  cursorVisible() {
+    const data = Buffer.alloc(24); data.writeUInt32LE(24);
+    return this.getCursorInfo(data) ? Boolean(data.readUInt32LE(4) & 1) : null;
   }
 }
 module.exports = { WindowsInput };

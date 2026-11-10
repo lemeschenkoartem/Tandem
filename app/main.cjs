@@ -1,5 +1,6 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut, clipboard, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut, clipboard, powerSaveBlocker, safeStorage, dialog } = require('electron');
+const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { createRelay } = require('../server/relay.cjs');
@@ -7,6 +8,7 @@ const { validateInput } = require('../shared/input.cjs');
 let win, relay, input, selected, granted = false, lastHeartbeat = 0;
 let emergencyShortcutAvailable = false;
 let powerBlocker;
+let sessions;
 function revoke(notify = true) {
   granted = false; input?.release();
   if (notify && win && !win.isDestroyed()) win.webContents.send('control-revoked');
@@ -23,7 +25,24 @@ function registerIPC() {
   ipcMain.handle('environment', event => {
     trusted(event);
     const addresses = networkAddresses();
-    return { platform: process.platform, version: app.getVersion(), addresses, defaultServer: `ws://${addresses[0] || '127.0.0.1'}:8787`, emergencyShortcutAvailable };
+    return { platform: process.platform, version: app.getVersion(), addresses, defaultServer: `ws://${addresses[0] || '127.0.0.1'}:8787`, emergencyShortcutAvailable, gpu: app.getGPUFeatureStatus() };
+  });
+  ipcMain.handle('load-session', (event, network) => { trusted(event); return sessions.get(network); });
+  ipcMain.handle('save-session', (event, network, token, server) => { trusted(event); return sessions.set(network, token, server); });
+  ipcMain.handle('last-session', event => { trusted(event); return sessions.last(); });
+  ipcMain.handle('clear-session', (event, network) => { trusted(event); sessions.clear(network); return true; });
+  ipcMain.handle('exit-fullscreen', event => { trusted(event); win.setFullScreen(false); return true; });
+  ipcMain.handle('cursor-state', event => {
+    trusted(event);
+    if (process.platform !== 'win32' || !selected) return null;
+    try { input ??= new (require('./windows-input.cjs').WindowsInput)(); return input.cursorVisible(); } catch { return null; }
+  });
+  ipcMain.handle('save-packet', async (event, packet) => {
+    trusted(event);
+    if (typeof packet !== 'string' || packet.length > 262144 || !packet.startsWith('tandem://direct/')) throw new Error('Некорректное приглашение.');
+    const result = await dialog.showSaveDialog(win, { title: 'Сохранить приглашение прямой связи', defaultPath: 'Tandem-connection.tandem', filters: [{ name: 'Tandem', extensions: ['tandem'] }] });
+    if (result.canceled) return false;
+    fs.writeFileSync(result.filePath, packet, 'utf8'); return true;
   });
   ipcMain.handle('sources', async event => {
     trusted(event);
@@ -63,7 +82,7 @@ function registerIPC() {
   });
   ipcMain.handle('revoke-control', event => { trusted(event); revoke(false); return true; });
   ipcMain.handle('end-session', event => { trusted(event); revoke(false); selected = undefined; if (powerBlocker !== undefined) powerSaveBlocker.stop(powerBlocker); powerBlocker = undefined; return true; });
-  ipcMain.handle('copy', (event, value) => { trusted(event); if (typeof value === 'string' && value.length <= 8192) clipboard.writeText(value); });
+  ipcMain.handle('copy', (event, value) => { trusted(event); if (typeof value === 'string' && value.length <= 262144) clipboard.writeText(value); });
   let inputWindow = 0, inputCount = 0;
   ipcMain.on('input', (event, raw) => {
     trusted(event);
@@ -95,6 +114,7 @@ function registerIPC() {
 app.whenReady().then(() => {
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
+  sessions = new (require('./session-store.cjs').SessionStore)(path.join(app.getPath('userData'), 'sessions.enc'), safeStorage);
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(wc === win?.webContents && ['media', 'display-capture', 'fullscreen', 'pointerLock'].includes(permission)));
   session.defaultSession.setPermissionCheckHandler((wc, permission) => wc === win?.webContents && ['media', 'display-capture', 'fullscreen', 'pointerLock'].includes(permission));
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
@@ -112,6 +132,9 @@ app.whenReady().then(() => {
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', event => event.preventDefault());
+  win.webContents.on('before-input-event', (event, key) => {
+    if (key.type === 'keyDown' && key.control && !key.alt && key.code === 'F12') { event.preventDefault(); win.webContents.send('exit-fullscreen'); }
+  });
   win.webContents.on('render-process-gone', () => revoke(false));
   win.on('closed', () => { revoke(false); win = null; });
   emergencyShortcutAvailable = globalShortcut.register('CommandOrControl+Alt+F12', () => { revoke(); win?.show(); win?.focus(); });

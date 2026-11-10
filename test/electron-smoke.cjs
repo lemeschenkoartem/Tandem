@@ -12,6 +12,8 @@ app.on('browser-window-created', (_, window) => {
     try {
       const result = await window.webContents.executeJavaScript(`(async () => {
         const env = await window.tandem.environment();
+        window.testNativeExitCount = 0; window.tandem.onExitFullscreen(() => { window.testNativeExitCount++; });
+        await window.tandem.loadSession('a'.repeat(32));
         await window.tandem.startRelay('ws://127.0.0.1:8787');
         const account = await new Promise((resolve, reject) => {
           const ws = new WebSocket('ws://127.0.0.1:8787');
@@ -21,6 +23,10 @@ app.on('browser-window-created', (_, window) => {
         });
         return { title: document.title, bridge: typeof window.tandem.input, version: env.version, account, status: document.getElementById('status').textContent };
       })()`);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'F12', modifiers: ['control'] });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      result.nativeFullscreenShortcut = await window.webContents.executeJavaScript('window.testNativeExitCount > 0');
+      if (!result.nativeFullscreenShortcut) throw new Error('Native Ctrl+F12 shortcut did not reach renderer');
       if (!/^[0-9]{8}$/.test(result.account.id)) throw new Error('Invalid account ID');
       console.log('ELECTRON_SMOKE_OK ' + JSON.stringify(result));
       clearTimeout(timer); app.quit();

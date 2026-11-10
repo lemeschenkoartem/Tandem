@@ -1,6 +1,6 @@
 {
   "name": "tandem-play",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Трансляция игры и совместное управление для двух друзей",
   "private": true,
   "main": "app/main.cjs",

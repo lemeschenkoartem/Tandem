@@ -41,7 +41,7 @@ function createRelay({ port = 8787, host = '0.0.0.0', maxRooms = 1000, databaseP
     if (++state.connections > 20) { state.connections--; ws.close(1008, 'Too many connections'); return; }
     ws.alive = true;
     ws.on('pong', () => { ws.alive = true; });
-    send(ws, { type: 'hello', protocol: 2, network: accounts.networkId });
+    send(ws, { type: 'hello', protocol: 3, network: accounts.networkId });
     let windowStart = Date.now(), messages = 0;
     ws.on('message', async raw => {
       if (Date.now() - windowStart > 1000) { windowStart = Date.now(); messages = 0; }
@@ -49,16 +49,25 @@ function createRelay({ port = 8787, host = '0.0.0.0', maxRooms = 1000, databaseP
       let msg;
       try { msg = JSON.parse(raw); } catch { fail(ws, 'Некорректное сообщение.'); return; }
       if (!msg || typeof msg !== 'object') return;
-      if (['register', 'login'].includes(msg.type)) {
+      if (['register', 'login', 'resume'].includes(msg.type)) {
         if (ws.authBusy || ws.account) return fail(ws, 'Запрос уже обрабатывается.');
         if (Date.now() - state.start > 60000) { state.start = Date.now(); state.creates = 0; state.authAttempts = 0; }
-        if (++state.authAttempts > 10) return fail(ws, 'Слишком много попыток входа. Подождите минуту.');
+        if (msg.type !== 'resume' && ++state.authAttempts > 10) return fail(ws, 'Слишком много попыток входа. Подождите минуту.');
         ws.authBusy = true;
         try {
-          const account = msg.type === 'register' ? await accounts.register(msg.name, msg.password) : await accounts.login(msg.name, msg.password);
-          if ([...wss.clients].some(client => client !== ws && client.readyState === WebSocket.OPEN && client.account?.id === account.id)) throw new Error('Этот аккаунт уже открыт на другом клиенте. Выйдите из него перед новым входом.');
+          const resumed = msg.type === 'resume' ? accounts.resume(msg.token) : null;
+          if (msg.type === 'resume' && !resumed) { fail(ws, 'Сохранённый вход истёк. Войдите заново.', 'SESSION_EXPIRED', msg.type); return; }
+          const account = resumed?.account || (msg.type === 'register' ? await accounts.register(msg.name, msg.password) : await accounts.login(msg.name, msg.password));
+          const hash = resumed ? accounts.sessionHash(msg.token) : null;
+          for (const client of wss.clients) {
+            if (client === ws || client.readyState !== WebSocket.OPEN || client.account?.id !== account.id) continue;
+            if (hash && client.sessionHash === hash) { remove(client); client.close(4001, 'Session resumed'); }
+            else { fail(ws, 'Этот аккаунт открыт на другом клиенте. Используйте отдельный аккаунт друга.', 'ACCOUNT_IN_USE', msg.type); return; }
+          }
           ws.account = account;
-          send(ws, { type: 'authenticated', account: ws.account, network: accounts.networkId });
+          const saved = resumed ? { token: msg.token, expires: resumed.expires } : accounts.createSession(account.name);
+          ws.sessionHash = accounts.sessionHash(saved.token);
+          send(ws, { type: 'authenticated', account: ws.account, network: accounts.networkId, ...saved });
         } catch (error) { fail(ws, error.message, 'AUTH_FAILED', msg.type); }
         finally { ws.authBusy = false; }
         return;
@@ -103,6 +112,9 @@ function createRelay({ port = 8787, host = '0.0.0.0', maxRooms = 1000, databaseP
         send(ws.role === 'host' ? room.guest : room.host, { type: 'signal', data });
       } else if (msg.type === 'leave') {
         remove(ws); send(ws, { type: 'left' });
+      } else if (msg.type === 'logout') {
+        remove(ws); accounts.revokeSession(ws.sessionHash); ws.account = undefined; ws.sessionHash = undefined;
+        send(ws, { type: 'logged-out' });
       }
     });
     ws.on('error', () => {});

@@ -7,9 +7,10 @@ let authResolve, authReject, sourceResolve, sourceReject, confirmResolve, authBu
 let incomingIce = [], signalQueue = Promise.resolve(), statsTimer, heartbeatTimer, lastStats, disconnectTimer;
 let settings, busy = false, toastTimer, pendingPointer, pointerFrame = 0, lastRtt;
 let remoteMedia = new MediaStream();
+let player, directState = null, resumePending = null, reconnectTimer, reconnectAttempts = 0, connectionGoal = null, diagnostics = {}, hostTelemetry = null, activeCodec = null, motionTimer = null, lastMotion = 0;
 let serverIdentity = null, foundFriend = null, pendingLookup = null, endingSession = null;
-const { normalizeServer: validateServer, createInvitation, parseTarget } = globalThis.TandemNetwork;
-const defaults = { resolution: '1920x1080', fps: 120, bitrate: 35, codec: 'H264', audio: true, embedded: true, ice: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const { normalizeServer: validateServer, createInvitation, parseTarget, createDirectPacket, parseDirectPacket, withoutVPN } = globalThis.TandemNetwork;
+const defaults = { resolution: '1920x1080', fps: 120, bitrate: 60, codec: 'H264', audio: true, embedded: true, mouseMode: 'game', hideCursor: true, ice: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 function toast(message, persist = false) {
   $('toast').textContent = String(message).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
@@ -23,7 +24,7 @@ function view(name) {
   document.querySelectorAll('[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === name));
 }
 function refreshProfile() {
-  const names = { '1920x1080': '1080p', '2560x1440': '1440p', '3840x2160': '4K' };
+  const names = { '1280x720': 'HD', '1920x1080': '1080p', '2560x1440': '1440p', '3840x2160': '4K' };
   $('profile-title').textContent = `${names[settings.resolution]} / ${settings.fps} FPS`;
 }
 function readSettings() {
@@ -31,19 +32,41 @@ function readSettings() {
   if (!Array.isArray(ice) || ice.length > 8 || ice.some(s => !s || typeof s !== 'object' || !(typeof s.urls === 'string' || Array.isArray(s.urls)))) throw new Error('ICE-серверы: ожидается массив объектов с полем urls.');
   const bitrate = Number($('bitrate').value), fps = Number($('fps').value), resolution = $('resolution').value;
   if (!Number.isFinite(bitrate) || bitrate < 5 || bitrate > 250) throw new Error('Битрейт: от 5 до 250 Мбит/с.');
-  if (![60, 90, 120, 144, 165, 240].includes(fps) || !['1920x1080', '2560x1440', '3840x2160'].includes(resolution)) throw new Error('Некорректный профиль.');
-  return { resolution, fps, bitrate, codec: $('codec').value, audio: $('audio').checked, embedded: $('embedded').checked, server: validateServer($('server').value.trim()), ice };
+  if (![60, 90, 120, 144, 165, 240].includes(fps) || !['1280x720', '1920x1080', '2560x1440', '3840x2160'].includes(resolution)) throw new Error('Некорректный профиль.');
+  return { resolution, fps, bitrate, codec: $('codec').value, audio: $('audio').checked, embedded: $('embedded').checked, mouseMode: $('mouse-mode').value, hideCursor: $('hide-cursor').checked, server: validateServer($('server').value.trim()), ice };
 }
 function persistSettings() {
   const safe = { ...settings, ice: settings.ice.filter(s => !s.credential && !s.username) };
   localStorage.setItem('tandem-settings-v1', JSON.stringify(safe));
   refreshProfile(); refreshAccount();
 }
-function saveSettings() {
+function commitSettings() {
   const next = readSettings();
   if (roomReady && ws && next.server !== validateServer(ws.url)) throw new Error('Сначала завершите подключение, затем меняйте сервер сети.');
   settings = next; persistSettings();
-  $('settings-result').textContent = 'Сохранено. Качество применится к следующей трансляции.';
+  $('settings-result').textContent = 'Настройки сохранены.'; player?.refresh();
+}
+async function saveSettings() {
+  const next = readSettings();
+  const approved = await confirmation('Сохранить настройки?', `${next.resolution} · ${next.fps} FPS · до ${next.bitrate} Мбит/с · ${next.codec}. ${peerReady ? (role === 'sender' ? 'Применить к текущей трансляции.' : 'Отправить хосту запрос на этот профиль.') : 'Применить при следующей трансляции.'}`, 'Сохранить');
+  if (!approved) return;
+  const changed = JSON.stringify(TandemQuality.profile(settings)) !== JSON.stringify(TandemQuality.profile(next));
+  commitSettings();
+  if (changed && peerReady && pc?.connectionState === 'connected') {
+    if (role === 'sender') await applyQuality(settings);
+    else { dataSend({ type: 'quality-request', profile: TandemQuality.profile(settings) }); $('settings-result').textContent = 'Сохранено. Запрос на изменение потока отправлен хосту.'; }
+  }
+  toast('Настройки сохранены.');
+}
+async function applyQuality(value) {
+  if (role !== 'sender' || !stream || !pc) return;
+  const next = TandemQuality.profile(value), previousCodec = activeCodec || settings.codec;
+  Object.assign(settings, next); showSettings(); persistSettings();
+  const [width, height] = next.resolution.split('x').map(Number);
+  await stream.getVideoTracks()[0].applyConstraints({ width: { ideal: width, max: width }, height: { ideal: height, max: height }, frameRate: { ideal: next.fps, max: next.fps }, cursor: settings.hideCursor === false ? 'always' : 'never' });
+  if (previousCodec !== next.codec) await makeOffer(); else await configureSenders();
+  dataSend({ type: 'quality-applied', profile: next });
+  $('settings-result').textContent = `Применено к потоку: ${next.resolution}, ${next.fps} FPS, лимит ${next.bitrate} Мбит/с. Фактический битрейт зависит от сети и сцены.`;
 }
 function refreshAccount() {
   const connected = account && ws?.readyState === WebSocket.OPEN;
@@ -64,6 +87,7 @@ async function copyInvitation() {
 }
 function showSettings() {
   for (const id of ['resolution', 'fps', 'bitrate', 'codec', 'server']) $(id).value = settings[id];
+  $('mouse-mode').value = settings.mouseMode || 'game'; $('hide-cursor').checked = settings.hideCursor !== false;
   $('audio').checked = settings.audio; $('embedded').checked = settings.embedded; $('ice').value = JSON.stringify(settings.ice, null, 2); refreshProfile();
 }
 function send(message) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('Нет соединения с сервером.'); ws.send(JSON.stringify(message)); }
@@ -92,7 +116,7 @@ async function chooseCapture() {
   const sourceId = await new Promise((resolve, reject) => { sourceResolve = resolve; sourceReject = reject; });
   await api.selectSource(sourceId);
   const [width, height] = settings.resolution.split('x').map(Number);
-  const options = { video: { width: { ideal: width, max: width }, height: { ideal: height, max: height }, frameRate: { ideal: settings.fps, max: settings.fps } }, audio: settings.audio };
+  const options = { video: { width: { ideal: width, max: width }, height: { ideal: height, max: height }, frameRate: { ideal: settings.fps, max: settings.fps }, cursor: settings.hideCursor === false ? 'always' : 'never' }, audio: settings.audio };
   let captured;
   try { captured = await navigator.mediaDevices.getDisplayMedia(options); }
   catch (error) {
@@ -114,19 +138,19 @@ function showVideo(media, local) {
   video.play().catch(() => { if (video.srcObject === media) toast('Нажмите на экран, чтобы включить воспроизведение.'); });
 }
 function updateControls() {
-  const connected = peerReady && pc?.connectionState === 'connected';
+  const connected = peerReady && pc?.connectionState === 'connected' && reliable?.readyState === 'open';
   $('request-control').hidden = role !== 'viewer' || !connected;
   $('request-control').textContent = controlling ? 'Вернуть управление' : 'Запросить управление';
   $('revoke-control').hidden = role !== 'sender' || !remoteControl;
   $('share-screen').hidden = role !== 'viewer' || !connected;
   $('mouse-lock').hidden = !controlling;
   $('control-status').textContent = controlling ? 'Вы управляете компьютером друга' : remoteControl ? 'Друг управляет вашим компьютером' : 'Управление у владельца';
-  $('stage').classList.toggle('control-active', controlling);
+  $('stage').classList.toggle('control-active', controlling); player?.refresh();
   $('stream-caption').textContent = controlling ? 'Кликните по видео для ввода. Esc — освободить мышь. Ctrl+Alt+F12 у владельца — отозвать доступ.' : 'Ctrl+Alt+F12 на компьютере владельца — вернуть управление';
 }
 async function revokeControl(notify = true) {
   remoteControl = controlling = false; clearInterval(heartbeatTimer);
-  if (document.pointerLockElement) document.exitPointerLock();
+  player?.unlock();
   await api.revokeControl();
   if (notify) dataSend({ type: 'control-revoked' });
   updateControls();
@@ -136,15 +160,28 @@ function configureChannel(channel) {
   else if (channel.label === 'control') reliable = channel;
   else { channel.close(); return; }
   channel.onmessage = event => {
-    if (typeof event.data === 'string' && event.data.length <= 8192) {
+    if (typeof event.data === 'string' && event.data.length <= 262144) {
       let message; try { message = JSON.parse(event.data); } catch { return; }
       run(handleData)(message);
     }
   };
+  channel.onopen = () => { if (directState) { directState.connected = true; $('direct-exchange').hidden = true; } updateControls(); };
   channel.onclose = () => { run(revokeControl)(false); };
 }
 async function handleData(message) {
   if (!message || typeof message !== 'object') return;
+  if (message.type === 'signal' && directState) { signalQueue = signalQueue.then(() => handleSignal(message.data)).catch(error => run(endSession)(error.message)); return; }
+  if (message.type === 'end' && directState) { await endSession('Друг завершил прямую сессию.'); return; }
+  if (message.type === 'cursor-state') { player?.hostCursor(message.visible); return; }
+  if (message.type === 'host-telemetry') { hostTelemetry = message.data; return; }
+  if (message.type === 'quality-request' && role === 'sender') {
+    const next = TandemQuality.profile(message.profile);
+    if (await confirmation('Изменить качество потока?', `Друг просит ${next.resolution} · ${next.fps} FPS · ${next.bitrate} Мбит/с · ${next.codec}. Применить сейчас?`, 'Применить')) await applyQuality(next);
+    else dataSend({ type: 'quality-denied' });
+    return;
+  }
+  if (message.type === 'quality-applied') { toast(`Хост применил ${message.profile.resolution} · ${message.profile.fps} FPS · лимит ${message.profile.bitrate} Мбит/с.`); return; }
+  if (message.type === 'quality-denied') { toast('Хост оставил текущий профиль трансляции.'); return; }
   if (message.type === 'input' && role === 'sender' && remoteControl) {
     api.input(message.event);
   } else if (message.type === 'pointer' && role === 'sender' && remoteControl && ['move', 'relative'].includes(message.event?.kind)) {
@@ -179,21 +216,21 @@ async function handleData(message) {
 function makePeer() {
   pc = new RTCPeerConnection({ iceServers: settings.ice, bundlePolicy: 'max-bundle' });
   const current = pc;
-  pc.onicecandidate = event => { if (event.candidate && pc === current) { try { send({ type: 'signal', data: { kind: 'ice', candidate: event.candidate.toJSON() } }); } catch {} } };
+  pc.onicecandidate = event => { if (event.candidate && pc === current) { try { sendSignal({ kind: 'ice', candidate: event.candidate.toJSON() }); } catch {} } };
   pc.ondatachannel = event => configureChannel(event.channel);
   pc.ontrack = event => {
     if (!remoteMedia.getTracks().some(t => t.id === event.track.id)) remoteMedia.addTrack(event.track);
     if (role === 'viewer') {
       showVideo(remoteMedia, false);
-      if ('playoutDelayHint' in event.receiver && event.track.kind === 'video') event.receiver.playoutDelayHint = 0;
-      if ('jitterBufferTarget' in event.receiver && event.track.kind === 'video') event.receiver.jitterBufferTarget = 0;
+      if ('playoutDelayHint' in event.receiver) event.receiver.playoutDelayHint = 0;
+      if ('jitterBufferTarget' in event.receiver) event.receiver.jitterBufferTarget = 0;
       $('stage-message').textContent = '';
     }
   };
   pc.onconnectionstatechange = () => {
     if (pc !== current) return;
-    clearTimeout(disconnectTimer);
-    if (pc.connectionState === 'connected') { status('Вы в одной сети', true); startStats(); }
+    if (['connected', 'failed', 'disconnected'].includes(pc.connectionState)) clearTimeout(disconnectTimer);
+    if (pc.connectionState === 'connected') { status(directState ? 'Прямая сессия установлена' : 'Вы в одной сети', true); startStats(); }
     else if (pc.connectionState === 'failed') { run(endSession)('Прямое соединение не удалось. Проверьте Tailscale или настройте TURN в разделе «Качество и сеть».'); }
     else if (pc.connectionState === 'disconnected') {
       run(revokeControl)(false); status('Соединение прервано…');
@@ -205,7 +242,7 @@ function makePeer() {
     configureChannel(pc.createDataChannel('control', { ordered: true }));
     configureChannel(pc.createDataChannel('pointer', { ordered: false, maxRetransmits: 0 }));
   }
-  disconnectTimer = setTimeout(() => { if (pc === current && pc.connectionState !== 'connected') run(endSession)('Не удалось установить видеосоединение за 25 секунд. Проверьте сетевой путь и ICE-серверы.'); }, 25000);
+  disconnectTimer = setTimeout(() => { if (pc === current && pc.connectionState !== 'connected') run(endSession)(directState ? 'Прямая связь не установилась. Проверьте обмен ответом; для сложного NAT нужен TURN.' : 'Не удалось установить видеосоединение за 25 секунд. Проверьте сетевой путь и ICE-серверы.'); }, directState ? 180000 : 25000);
   return pc;
 }
 async function attachTracks() {
@@ -233,11 +270,12 @@ async function configureSenders() {
     await sender.setParameters(params);
   }
 }
-async function makeOffer() {
+async function makeOffer(manual = false) {
   if (!pc) makePeer();
   await attachTracks();
-  await pc.setLocalDescription(await pc.createOffer()); await configureSenders();
-  send({ type: 'signal', data: { kind: 'offer', sdp: pc.localDescription.sdp } });
+  const offer = await pc.createOffer(); offer.sdp = TandemQuality.startBitrate(offer.sdp, settings.bitrate);
+  await pc.setLocalDescription(offer); await configureSenders(); activeCodec = settings.codec;
+  if (!manual) sendSignal({ kind: 'offer', sdp: pc.localDescription.sdp });
 }
 async function handleSignal(data) {
   if (!peerReady) return;
@@ -251,8 +289,79 @@ async function handleSignal(data) {
   for (const candidate of incomingIce.splice(0)) await pc.addIceCandidate(candidate);
   if (data.kind === 'offer') {
     await pc.setLocalDescription(await pc.createAnswer());
-    send({ type: 'signal', data: { kind: 'answer', sdp: pc.localDescription.sdp } });
+    sendSignal({ kind: 'answer', sdp: pc.localDescription.sdp });
   }
+}
+function sendSignal(data) {
+  if (directState) {
+    if (data.kind === 'ice' && data.candidate && !withoutVPN('a=' + data.candidate.candidate + '\r\n').trim()) return;
+    if (reliable?.readyState === 'open') dataSend({ type: 'signal', data });
+  } else send({ type: 'signal', data });
+}
+function waitIce(peer) {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); peer.removeEventListener('icegatheringstatechange', check); resolve(); };
+    const check = () => { if (peer.iceGatheringState === 'complete') done(); };
+    const timer = setTimeout(done, 10000); peer.addEventListener('icegatheringstatechange', check);
+  });
+}
+function directOutput(kind) {
+  const packet = createDirectPacket({ kind, session: directState.session, name: account?.name || (owner ? 'Владелец' : 'Друг'), sdp: withoutVPN(pc.localDescription.sdp) });
+  $('direct-output').value = packet; $('direct-exchange').hidden = false;
+  $('direct-help').textContent = kind === 'offer' ? 'Отправьте приглашение другу (для мессенджера удобнее файл). Друг создаст ответ; вставьте его ниже или откройте файл ответа.' : 'Отправьте этот ответ владельцу. Он применит ответ и подтвердит подключение. VPN и общий сервер не нужны; при сложном NAT понадобится TURN.';
+  for (const id of ['direct-response', 'direct-apply', 'direct-open-response']) $(id).hidden = kind !== 'offer';
+}
+async function createDirect() {
+  if (busy || roomReady) return;
+  busy = true; buttonsBusy(true); owner = true; role = 'sender'; commitSettings();
+  directState = { session: Array.from(crypto.getRandomValues(new Uint8Array(16)), x => x.toString(16).padStart(2, '0')).join(''), connected: false };
+  try {
+    stream = await chooseCapture(); showVideo(stream, true); await makeOffer(true); await waitIce(pc);
+    roomReady = true; activeUI(); directOutput('offer'); status('Передайте прямое приглашение другу');
+  } catch (error) { await endSession(); throw error; }
+  finally { busy = false; buttonsBusy(false); }
+}
+async function importDirect(text) {
+  const packet = parseDirectPacket(text);
+  if (packet.kind === 'answer') return applyDirectAnswer(packet);
+  if (roomReady || busy) throw new Error('Сначала завершите текущее подключение.');
+  busy = true; buttonsBusy(true); owner = false; role = 'viewer'; commitSettings();
+  directState = { session: packet.session, connected: false }; peerReady = true; peerName = packet.name;
+  try {
+    makePeer(); await pc.setRemoteDescription({ type: 'offer', sdp: withoutVPN(packet.sdp) });
+    await pc.setLocalDescription(await pc.createAnswer()); await waitIce(pc);
+    roomReady = true; activeUI(); directOutput('answer'); status('Отправьте ответ владельцу и дождитесь принятия');
+  } catch (error) { await endSession(); throw error; }
+  finally { busy = false; buttonsBusy(false); }
+}
+async function applyDirectAnswer(packet) {
+  if (!directState || !owner || packet.kind !== 'answer' || packet.session !== directState.session) throw new Error('Этот ответ относится к другому приглашению. Создайте новую прямую сессию.');
+  if (!await confirmation('Принять прямое подключение?', `Ответ от «${packet.name}». После принятия он увидит выбранный монитор. Управление разрешается отдельно.`, 'Принять')) return;
+  peerName = packet.name; peerReady = true;
+  await pc.setRemoteDescription({ type: 'answer', sdp: withoutVPN(packet.sdp) });
+  $('peer-label').textContent = `Прямое соединение · ${peerName}`; updateControls();
+}
+async function tryResume() {
+  const token = await api.loadSession?.(serverIdentity);
+  if (!token) return false;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { resumePending = null; reject(new Error('Восстановление входа не ответило. Повторите подключение.')); }, 10000);
+    resumePending = { resolve: value => { clearTimeout(timer); resumePending = null; resolve(value); }, reject: error => { clearTimeout(timer); resumePending = null; reject(error); } };
+    send({ type: 'resume', token });
+  });
+}
+function reconnect(goal) {
+  clearTimeout(reconnectTimer);
+  if (!goal || directState) return;
+  status('Связь с сервером прервана · восстанавливаем вход…');
+  reconnectTimer = setTimeout(async () => {
+    try {
+      await connect(goal.server, goal.network);
+      if (await tryResume()) { reconnectAttempts = 0; idleStatus(); toast('Вход восстановлен. При необходимости подключитесь к другу снова.'); }
+      else { connectionGoal = null; idleStatus(); toast('Сохранённый вход недоступен. Войдите заново.'); }
+    } catch { reconnectAttempts++; reconnect(goal); }
+  }, Math.min(15000, 1000 * 2 ** reconnectAttempts));
 }
 async function connect(url, expectedNetwork) {
   url = validateServer(url);
@@ -266,6 +375,7 @@ async function connect(url, expectedNetwork) {
   }
   if (roomReady) throw new Error('Сначала завершите текущее подключение.');
   if (ws) await endSession(undefined, { disconnect: true });
+  clearTimeout(reconnectTimer);
   account = null; serverIdentity = null; refreshAccount();
   const socket = new WebSocket(url); ws = socket;
   await new Promise((resolve, reject) => {
@@ -281,7 +391,7 @@ async function connect(url, expectedNetwork) {
       if (ws !== socket) return;
       let msg; try { msg = JSON.parse(event.data); } catch { return; }
       if (msg.type === 'hello') {
-        if (msg.protocol !== 2 || !/^[a-f0-9]{32}$/.test(msg.network)) { fail(new Error('Обновите Tandem на компьютере владельца сети до версии 0.1.1.')); return; }
+        if (msg.protocol !== 3 || !/^[a-f0-9]{32}$/.test(msg.network)) { fail(new Error('Обновите Tandem на компьютере владельца сети до версии 0.2.0.')); return; }
         if (expectedNetwork && msg.network !== expectedNetwork) { fail(new Error('Приглашение относится к другой базе аккаунтов. Проверьте VPN-адрес друга и получите новое приглашение.')); return; }
         serverIdentity = msg.network; ready = true; clearTimeout(timer); refreshAccount(); resolve(); return;
       }
@@ -291,17 +401,20 @@ async function connect(url, expectedNetwork) {
     };
     socket.onclose = () => {
       clearTimeout(timer); if (ws !== socket) return;
-      ws = null; account = null; serverIdentity = null; refreshAccount();
+      const goal = connectionGoal; ws = null; account = null; serverIdentity = null; refreshAccount();
+      resumePending?.reject(new Error('Сервер отключился.'));
       reject(new Error('Соединение с сервером закрыто.'));
+      if (directState) return;
       if (authReject) cancelAuth('Сервер отключился.');
       if (roomReady || stream || busy) run(endSession)('Сервер отключился. Проверьте VPN и запущен ли Tandem у владельца сети.', { notifyServer: false });
-      else { idleStatus(); toast('Соединение с сервером закрыто.'); }
+      else idleStatus();
+      if (goal) reconnect(goal); else toast('Соединение с сервером закрыто.');
     };
   });
 }
 async function ensureAuth(url, expectedNetwork) {
   await connect(url, expectedNetwork);
-  if (account) return;
+  if (account || await tryResume()) return;
   $('auth-server').textContent = `Сервер: ${url} · сеть ${serverIdentity.slice(0, 8)}`;
   $('auth-result').textContent = 'У каждого сервера свои аккаунты и ID. Если вы регистрировались на другом ПК-сервере, здесь нужно создать аккаунт. Для одного сервера повторный вход при поиске не нужен.';
   $('auth-dialog').showModal();
@@ -321,6 +434,11 @@ async function submitAuth(register) {
 }
 async function handleServer(msg) {
   if (msg.type === 'error') {
+    if (msg.request === 'resume' && resumePending) {
+      if (msg.code === 'SESSION_EXPIRED') { await api.clearSession?.(serverIdentity); resumePending.resolve(false); }
+      else resumePending.reject(new Error(msg.message));
+      return;
+    }
     if ($('auth-dialog').open) { $('auth-result').textContent = msg.message; setAuthBusy(false); }
     else {
       busy = false; buttonsBusy(false);
@@ -333,7 +451,12 @@ async function handleServer(msg) {
       toast(msg.message);
     }
   } else if (msg.type === 'authenticated') {
-    account = msg.account; serverIdentity = msg.network; setAuthBusy(false); refreshAccount(); idleStatus();
+    const sourceSocket = ws, endpoint = validateServer(ws.url);
+    account = msg.account; serverIdentity = msg.network; connectionGoal = { server: endpoint, network: msg.network };
+    if (msg.token) { try { const saved = await api.saveSession?.(msg.network, msg.token, endpoint); if (saved === false) toast('Windows не предоставила защищённое хранилище: вход сохранён только до закрытия приложения.'); } catch { toast('Не удалось сохранить ключ в Windows. В текущей сессии вход выполнен.'); } }
+    if (ws !== sourceSocket || ws?.readyState !== WebSocket.OPEN) return;
+    localStorage.setItem('tandem-last-network', msg.network); connectionGoal = { server: endpoint, network: msg.network }; reconnectAttempts = 0;
+    resumePending?.resolve(true); setAuthBusy(false); refreshAccount(); idleStatus();
     $('login-password').value = ''; $('auth-dialog').close(); authResolve?.(); authReject = authResolve = null;
   } else if (msg.type === 'found') {
     busy = false; buttonsBusy(false);
@@ -361,16 +484,18 @@ async function handleServer(msg) {
   else if (msg.type === 'rejected') await endSession('Владелец отклонил подключение.');
 }
 function activeUI() {
-  $('connection-idle').hidden = true; $('connection-active').hidden = false; $('invitation-box').hidden = !owner;
-  $('network-title').textContent = owner ? 'Ваша закрытая сеть' : 'Сеть друга'; updateControls();
+  $('connection-idle').hidden = true; $('connection-active').hidden = false; $('invitation-box').hidden = !owner || Boolean(directState);
+  $('direct-exchange').hidden = !directState || directState.connected;
+  $('network-title').textContent = directState ? 'Прямая связь без VPN' : owner ? 'Ваша закрытая сеть' : 'Сеть друга'; updateControls();
 }
 function buttonsBusy(value) { $('create').disabled = $('join').disabled = value; }
 async function createNetwork() {
   if (!api) throw new Error('Откройте настольное приложение Tandem.');
+  if ($('connection-mode').value === 'direct') return createDirect();
   if (busy || roomReady) return;
   busy = true; buttonsBusy(true); owner = true; role = 'sender';
   try {
-    saveSettings();
+    commitSettings();
     if (settings.embedded) await api.startRelay(settings.server);
     await ensureAuth(settings.server); stream = await chooseCapture(); showVideo(stream, true);
     send({ type: 'create' });
@@ -379,6 +504,7 @@ async function createNetwork() {
 async function joinNetwork() {
   if (!api) throw new Error('Откройте настольное приложение Tandem.');
   if (busy || roomReady) return;
+  if ($('invite-input').value.trim().startsWith('tandem://direct/')) return importDirect($('invite-input').value.trim());
   const target = parseTarget($('invite-input').value);
   busy = true; buttonsBusy(true); foundFriend = null; $('connect-friend').hidden = true;
   try {
@@ -398,9 +524,12 @@ function endSession(message, options = {}) {
   return endingSession;
 }
 async function resetSession(message, { disconnect = false, notifyServer = true } = {}) {
-  roomReady = peerReady = false; busy = false; controlling = remoteControl = false;
+  if (directState) dataSend({ type: 'end' });
+  directState = null; $('direct-exchange').hidden = true; $('direct-output').value = ''; $('direct-response').value = '';
+  roomReady = peerReady = false; busy = false; controlling = remoteControl = false; hostTelemetry = null;
+  player?.unlock();
   clearInterval(statsTimer); clearInterval(heartbeatTimer); clearTimeout(disconnectTimer);
-  if (pointerFrame) cancelAnimationFrame(pointerFrame); pointerFrame = 0; pendingPointer = null;
+  if (pointerFrame) cancelAnimationFrame(pointerFrame); clearTimeout(motionTimer); motionTimer = null; pointerFrame = 0; pendingPointer = null;
   if (confirmResolve) finishConfirmation(false);
   if (sourceReject) cancelSource();
   await revokeControl(false); await api?.endSession();
@@ -408,6 +537,7 @@ async function resetSession(message, { disconnect = false, notifyServer = true }
   reliable = pointer = null; incomingIce = []; lastStats = lastRtt = null; remoteMedia = new MediaStream();
   stopStream(stream); stopStream(pendingStream); stream = pendingStream = null;
   if (ws?.readyState === WebSocket.OPEN && notifyServer) ws.send(JSON.stringify({ type: 'leave' }));
+  if (disconnect) { clearTimeout(reconnectTimer); connectionGoal = null; }
   if (disconnect && ws) { const socket = ws; ws = null; socket.onclose = null; socket.close(); account = null; serverIdentity = null; }
   refreshAccount();
   $('video').srcObject = null; $('video').hidden = true; $('stage-idle').hidden = false; $('stream-overlay').hidden = true;
@@ -417,6 +547,7 @@ async function resetSession(message, { disconnect = false, notifyServer = true }
   for (const id of ['rtt', 'fps', 'bitrate', 'loss']) $(`stat-${id}`).firstChild.textContent = '—';
   $('metrics-detail').textContent = 'Показатели появятся после подключения. RTT — время туда и обратно, не полная задержка управления.';
   if (message) toast(message, true);
+  if (!ws && connectionGoal && !disconnect) reconnect(connectionGoal);
 }
 function metric(id, value) { $(`stat-${id}`).firstChild.textContent = value == null ? '—' : String(value); }
 function startStats() {
@@ -462,48 +593,27 @@ function startStats() {
       jitter = ` · буфер ${(1000 * (video.jitterBufferDelay - lastStats.jitter) / (video.jitterBufferEmittedCount - lastStats.emitted)).toFixed(1)} мс`;
     const route = pair ? ((local?.candidateType === 'relay' || remote?.candidateType === 'relay') ? 'TURN' : 'WebRTC без TURN') : 'маршрут определяется';
     const implementation = video.encoderImplementation || video.decoderImplementation;
+    const hw = role === 'sender' ? video.powerEfficientEncoder : video.powerEfficientDecoder;
+    const telemetry = { codec, implementation: implementation || 'не сообщён', hardware: hw ?? null, limitation: video.qualityLimitationReason || 'none', targetMbps: settings.bitrate, actualMbps: elapsed > 0 ? Number(((bytes - lastStats.bytes) * 8 / elapsed / 1000000).toFixed(1)) : 0, fps: Math.round(fps || 0), resolution: `${width}x${height}`, processing, route };
+    diagnostics = { role, rtt: lastRtt, local: telemetry, host: hostTelemetry, gpu: env.gpu || {}, mouseLocked: Boolean(document.pointerLockElement) };
+    if (role === 'sender') {
+      dataSend({ type: 'host-telemetry', data: telemetry });
+      const visible = await api.cursorState?.(); if (typeof visible === 'boolean') dataSend({ type: 'cursor-state', visible });
+    }
+    const host = role === 'sender' ? telemetry : hostTelemetry;
+    $('encoder-status').textContent = host ? `Хост: ${host.resolution} · ${host.fps} FPS · ${host.codec}\nКодировщик: ${host.implementation} · аппаратный: ${host.hardware === true ? 'да' : host.hardware === false ? 'нет' : 'браузер не сообщил'}\nБитрейт: ${host.actualMbps} Мбит/с, лимит ${host.targetMbps} · ограничение: ${host.limitation}. ${host.processing}` : 'Ожидаем диагностику кодировщика хоста…';
     $('metrics-detail').textContent = `${actual} · ${codec} · ${route}${processing}${jitter}${implementation ? ` · ${implementation}` : ''}${video.qualityLimitationReason && video.qualityLimitationReason !== 'none' ? ` · ограничение: ${video.qualityLimitationReason}` : ''}. RTT — сеть туда и обратно.`;
     lastStats = { time: now, bytes, frames, lost: video.packetsLost || 0, received: video.packetsReceived || 0, processing: role === 'sender' ? video.totalEncodeTime : video.totalDecodeTime, jitter: video.jitterBufferDelay || 0, emitted: video.jitterBufferEmittedCount || 0 };
   }), 1000);
 }
-function videoPoint(event) {
-  const rect = $('video').getBoundingClientRect(), v = $('video');
-  const ratio = v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 16 / 9;
-  let width = rect.width, height = width / ratio;
-  if (height > rect.height) { height = rect.height; width = height * ratio; }
-  const x = (event.clientX - rect.left - (rect.width - width) / 2) / width;
-  const y = (event.clientY - rect.top - (rect.height - height) / 2) / height;
-  return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { kind: 'move', x, y } : null;
-}
 function inputEvent(event) { dataSend({ type: 'input', event }); }
-function releaseKeys() { if (controlling) inputEvent({ kind: 'release' }); }
-$('video').addEventListener('mousemove', event => {
-  if (!controlling || document.activeElement !== $('stage')) return;
-  const value = document.pointerLockElement ? { kind: 'relative', dx: event.movementX, dy: event.movementY } : videoPoint(event);
-  if (!value) return;
+function releaseKeys() { player?.release(); }
+function motionEvent(value) {
   if (value.kind === 'relative' && pendingPointer?.kind === 'relative') { pendingPointer.dx += value.dx; pendingPointer.dy += value.dy; }
   else pendingPointer = value;
-  if (!pointerFrame) pointerFrame = requestAnimationFrame(() => { pointerFrame = 0; if (pendingPointer && controlling) dataSend({ type: 'pointer', event: pendingPointer }, pointer); pendingPointer = null; });
-});
-$('video').addEventListener('mousedown', event => {
-  $('stage').focus();
-  if (!controlling || ![0, 1, 2].includes(event.button)) return;
-  event.preventDefault();
-  if (!document.pointerLockElement) { const point = videoPoint(event); if (!point) return; inputEvent(point); }
-  inputEvent({ kind: 'button', button: event.button, down: true });
-});
-window.addEventListener('mouseup', event => { if (controlling && [0, 1, 2].includes(event.button)) inputEvent({ kind: 'button', button: event.button, down: false }); });
-$('video').addEventListener('contextmenu', event => event.preventDefault());
-$('video').addEventListener('wheel', event => { if (controlling && document.activeElement === $('stage')) { event.preventDefault(); inputEvent({ kind: 'wheel', delta: -Math.sign(event.deltaY) * 120 }); } }, { passive: false });
-for (const type of ['keydown', 'keyup']) $('stage').addEventListener(type, event => {
-  if (!controlling || (event.code === 'F12' && event.ctrlKey && event.altKey)) return;
-  if (event.code === 'Escape' && document.pointerLockElement) { releaseKeys(); return; }
-  event.preventDefault(); if (event.repeat) return;
-  inputEvent({ kind: 'key', code: event.code, down: type === 'keydown' });
-});
-$('stage').addEventListener('blur', releaseKeys); window.addEventListener('blur', releaseKeys);
-document.addEventListener('visibilitychange', () => { if (document.hidden) releaseKeys(); });
-document.addEventListener('pointerlockchange', () => { if (!document.pointerLockElement) releaseKeys(); $('mouse-lock').textContent = document.pointerLockElement ? 'Мышь захвачена · Esc' : 'Захват мыши'; });
+  const flush = () => { motionTimer = null; if (pendingPointer && controlling) { dataSend({ type: 'pointer', event: pendingPointer }, pointer); lastMotion = performance.now(); } pendingPointer = null; };
+  if (!motionTimer) { const remaining = 4 - (performance.now() - lastMotion); if (remaining <= 0) flush(); else motionTimer = setTimeout(flush, remaining); }
+}
 document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => view(button.dataset.view));
 $('source-summary').onclick = () => view('settings');
 $('save-settings').onclick = run(saveSettings);
@@ -523,8 +633,8 @@ $('share-screen').onclick = run(async () => {
   if (pendingStream) return;
   pendingStream = await chooseCapture(); dataSend({ type: 'swap-request' }); toast('Запрос на смену ролей отправлен.');
 });
-$('mouse-lock').onclick = run(async () => { if (controlling) await $('video').requestPointerLock({ unadjustedMovement: true }).catch(() => $('video').requestPointerLock()); });
-$('fullscreen').onclick = run(async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await $('stage').requestFullscreen(); });
+$('mouse-lock').onclick = run(() => player.lock());
+$('fullscreen').onclick = run(() => player.fullscreen());
 $('sound').onclick = () => { $('video').muted = !$('video').muted; $('sound').textContent = $('video').muted ? 'Звук: выкл.' : 'Звук: вкл.'; };
 $('invite-input').addEventListener('input', () => { foundFriend = null; pendingLookup = null; $('connect-friend').hidden = true; $('friend-result').textContent = ''; });
 $('connect-friend').onclick = run(async () => {
@@ -533,21 +643,42 @@ $('connect-friend').onclick = run(async () => {
 });
 $('account-login').onclick = run(async () => {
   if (roomReady) return;
-  saveSettings(); owner = settings.embedded;
+  commitSettings(); owner = settings.embedded;
   if (settings.embedded) await api.startRelay(settings.server);
   await ensureAuth(settings.server);
 });
 $('copy-own-id').onclick = run(async () => { if (account) { await api.copy(account.id); toast('Ваш ID скопирован.'); } });
 $('copy-account-invite').onclick = run(copyInvitation);
-$('account-logout').onclick = run(() => endSession(undefined, { disconnect: true }));
+$('account-logout').onclick = run(async () => { clearTimeout(reconnectTimer); connectionGoal = null; if (serverIdentity) await api.clearSession?.(serverIdentity); localStorage.removeItem('tandem-last-network'); if (ws?.readyState === WebSocket.OPEN) send({ type: 'logout' }); await endSession(undefined, { disconnect: true }); });
+$('connection-mode').onchange = () => { $('create').textContent = $('connection-mode').value === 'direct' ? 'Создать прямое приглашение' : 'Создать сеть'; };
+$('direct-copy').onclick = run(async () => { await api.copy($('direct-output').value); toast('Скопировано. Длинное приглашение удобнее отправить файлом.'); });
+$('direct-save').onclick = run(() => api.savePacket($('direct-output').value));
+$('direct-apply').onclick = run(() => importDirect($('direct-response').value.trim()));
+let responseFile = false;
+$('import-packet').onclick = () => { responseFile = false; $('packet-file').click(); };
+$('direct-open-response').onclick = () => { responseFile = true; $('packet-file').click(); };
+$('packet-file').onchange = run(async () => { const file = $('packet-file').files[0]; if (!file) return; if (file.size > 262144) throw new Error('Слишком большой файл приглашения.'); const text = (await file.text()).trim(); parseDirectPacket(text); if (responseFile) $('direct-response').value = text; else { $('invite-input').value = text; $('connection-mode').value = 'direct'; } $('packet-file').value = ''; });
+$('copy-diagnostics').onclick = run(async () => { await api.copy(JSON.stringify(diagnostics, null, 2)); toast('Диагностика скопирована.'); });
+for (const button of document.querySelectorAll('[data-preset]')) button.onclick = () => {
+  const presets = { hd: ['1280x720', 120, 20, 'H264'], clear: ['1920x1080', 60, 45, 'H264'], fast: ['1920x1080', 120, 65, 'H264'], av1: ['1920x1080', 120, 45, 'AV1'] };
+  const values = presets[button.dataset.preset]; ['resolution', 'fps', 'bitrate', 'codec'].forEach((id, i) => { $(id).value = values[i]; });
+  $('settings-result').textContent = 'Профиль выбран. Нажмите «Сохранить настройки», чтобы применить.';
+};
+player = TandemPlayer.create({ state: () => ({ controlling, mode: settings?.mouseMode || 'game', hideCursor: settings?.hideCursor !== false }), input: inputEvent, motion: motionEvent, error: error => toast(error.message || error), nativeExit: () => api.exitFullscreen?.() });
 window.addEventListener('beforeunload', () => { releaseKeys(); stopStream(stream); stopStream(pendingStream); });
 run(async () => {
   env = api ? await api.environment() : { defaultServer: 'ws://127.0.0.1:8787', platform: 'browser' };
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('tandem-settings-v1') || '{}'); } catch {}
+  const remembered = await api?.lastSession?.();
+  if (!Object.keys(saved).length && remembered) saved = { server: remembered.server, embedded: ['localhost', '127.0.0.1', ...(env.addresses || [])].includes(new URL(remembered.server).hostname) };
   settings = { ...defaults, server: env.defaultServer, ...saved }; showSettings(); refreshAccount();
   if (!api) { status('Откройте настольный клиент для подключения'); return; }
   $('platform-label').textContent = env.platform === 'win32' ? 'Windows · клиент готов' : 'Предпросмотр · ввод только Windows';
   api.onRevoke(() => run(async () => { await revokeControl(); toast('Управление отозвано владельцем.'); })());
-  api.onError(message => toast(message, true));
+  api.onError(message => toast(message, true)); api.onExitFullscreen?.(() => run(() => player.exitFullscreen())());
+  const network = remembered ? (remembered.server === settings.server ? remembered.network : null) : localStorage.getItem('tandem-last-network');
+  if (network && await api.loadSession?.(network)) {
+    try { if (settings.embedded) await api.startRelay(settings.server); await connect(settings.server, network); await tryResume(); } catch (error) { toast('Автовход: ' + error.message); }
+  }
 
 })();

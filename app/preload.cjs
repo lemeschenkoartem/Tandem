@@ -2,6 +2,14 @@
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('tandem', {
   environment: () => ipcRenderer.invoke('environment'),
+  loadSession: network => ipcRenderer.invoke('load-session', network),
+  saveSession: (network, token, server) => ipcRenderer.invoke('save-session', network, token, server),
+  lastSession: () => ipcRenderer.invoke('last-session'),
+  clearSession: network => ipcRenderer.invoke('clear-session', network),
+  exitFullscreen: () => ipcRenderer.invoke('exit-fullscreen'),
+  cursorState: () => ipcRenderer.invoke('cursor-state'),
+  savePacket: packet => ipcRenderer.invoke('save-packet', packet),
+  onExitFullscreen: callback => ipcRenderer.on('exit-fullscreen', () => callback()),
   sources: () => ipcRenderer.invoke('sources'),
   selectSource: id => ipcRenderer.invoke('select-source', id),
   startRelay: url => ipcRenderer.invoke('start-relay', url),

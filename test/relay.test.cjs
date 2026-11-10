@@ -42,7 +42,7 @@ test('failed lookup, rejection and leaving a room preserve authentication and al
     owner.send({ type: 'register', name: 'owner', password: 'owner-password-123' });
     const identity = (await owner.next()).account;
     guest.send({ type: 'register', name: 'friend', password: 'friend-password-123' }); await guest.next();
-    assert.equal(owner.hello.protocol, 2); assert.equal(owner.hello.network, guest.hello.network);
+    assert.equal(owner.hello.protocol, 3); assert.equal(owner.hello.network, guest.hello.network);
     guest.send({ type: 'find', id: '00000000' });
     const failure = await guest.next(); assert.equal(failure.code, 'ID_NOT_FOUND'); assert.equal(failure.request, 'find');
     owner.send({ type: 'create' }); await owner.next();

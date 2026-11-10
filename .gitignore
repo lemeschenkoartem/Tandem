@@ -3,3 +3,7 @@ release/
 artifacts/
 *.log
 .env
+
+*.sqlite*
+*.enc
+server/data/
