@@ -1,0 +1,33 @@
+name: Upload verified Windows release
+
+on:
+  push:
+    branches:
+      - upload/windows-0.1.1
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Read release instructions
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Retrieve and verify the prepared Windows archive
+        run: |
+          mkdir -p release-assets
+          curl --fail --location --show-error --retry 2 --connect-timeout 30 --max-time 600 https://files.catbox.moe/3nzzop.zip --output release-assets/Tandem-0.1.1-Windows-x64.zip
+          echo '42590a6a75d40f526e0ff5a6073036e872cb8a9a9df21d10db357f24db6b90d2  release-assets/Tandem-0.1.1-Windows-x64.zip' | sha256sum --check --strict
+          cp START-HERE.txt release-assets/Tandem-0.1.1-start.txt
+          cd release-assets
+          sha256sum Tandem-0.1.1-Windows-x64.zip Tandem-0.1.1-start.txt > SHA256SUMS.txt
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload v0.1.1 release-assets/Tandem-0.1.1-Windows-x64.zip release-assets/Tandem-0.1.1-start.txt release-assets/SHA256SUMS.txt --clobber
