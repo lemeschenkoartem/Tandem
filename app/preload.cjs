@@ -2,6 +2,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('tandem', {
   environment: () => ipcRenderer.invoke('environment'),
+  loadSettings: () => ipcRenderer.invoke('load-settings'),
+  saveSettings: value => ipcRenderer.invoke('save-settings', value),
+  loadContacts: (network, id) => ipcRenderer.invoke('load-contacts', network, id),
+  saveContacts: (network, id, value) => ipcRenderer.invoke('save-contacts', network, id, value),
+  saveAccount: (network, value) => ipcRenderer.invoke('save-account', network, value),
+  openDataDirectory: () => ipcRenderer.invoke('open-data-directory'),
   loadSession: network => ipcRenderer.invoke('load-session', network),
   saveSession: (network, token, server) => ipcRenderer.invoke('save-session', network, token, server),
   lastSession: () => ipcRenderer.invoke('last-session'),

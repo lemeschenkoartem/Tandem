@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut, clipboard, powerSaveBlocker, safeStorage, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut, clipboard, powerSaveBlocker, safeStorage, dialog, net, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -9,6 +9,36 @@ let win, relay, input, selected, granted = false, lastHeartbeat = 0;
 let emergencyShortcutAvailable = false;
 let powerBlocker;
 let sessions;
+let local;
+let servicePromise;
+async function serviceConfiguration() {
+  if (servicePromise) return servicePromise;
+  servicePromise = (async () => {
+    const bundled = JSON.parse(fs.readFileSync(path.join(__dirname, 'service.json'), 'utf8'));
+    const override = local.read('service.json', {});
+    let configured = process.env.TANDEM_SERVICE_URL || override.server || bundled.server;
+    if (!configured && bundled.manifest) {
+      try {
+        const response = await net.fetch(bundled.manifest, { signal: AbortSignal.timeout(4000) });
+        if (response.ok) {
+          const text = await response.text();
+          if (text.length <= 8192) {
+            const value = JSON.parse(text);
+            if (value.server === null || (typeof value.server === 'string' && value.server.startsWith('wss://'))) {
+              configured = value.server; local.write('service-cache.json', { server: configured });
+            }
+          }
+        }
+      } catch {}
+      configured ??= local.read('service-cache.json', {}).server;
+    }
+    if (!configured) return null;
+    const normalized = require('./network.js').normalizeServer(configured), url = new URL(normalized);
+    if (url.protocol !== 'wss:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname)) throw new Error('Общая служба должна использовать защищённый WSS.');
+    return normalized;
+  })();
+  return servicePromise;
+}
 function revoke(notify = true) {
   granted = false; input?.release();
   if (notify && win && !win.isDestroyed()) win.webContents.send('control-revoked');
@@ -22,11 +52,19 @@ function trusted(event) {
   if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw new Error('Недопустимый источник IPC.');
 }
 function registerIPC() {
-  ipcMain.handle('environment', event => {
+  ipcMain.handle('environment', async event => {
     trusted(event);
     const addresses = networkAddresses();
-    return { platform: process.platform, version: app.getVersion(), addresses, defaultServer: `ws://${addresses[0] || '127.0.0.1'}:8787`, emergencyShortcutAvailable, gpu: app.getGPUFeatureStatus() };
+    const server = await serviceConfiguration(), cachedAccount = local.read('account.json');
+    const lastAccount = cachedAccount && /^[a-f0-9]{32}$/.test(cachedAccount.network) && /^[0-9]{8}$/.test(cachedAccount.id) ? cachedAccount : null;
+    return { platform: process.platform, version: app.getVersion(), addresses, defaultServer: server, serviceConfigured: Boolean(server), dataDirectory: app.getPath('userData'), lastAccount, emergencyShortcutAvailable, gpu: app.getGPUFeatureStatus() };
   });
+  ipcMain.handle('load-settings', event => { trusted(event); return local.settings(); });
+  ipcMain.handle('save-settings', (event, value) => { trusted(event); return local.settings(value); });
+  ipcMain.handle('load-contacts', (event, network, id) => { trusted(event); return local.contacts(network, id); });
+  ipcMain.handle('save-contacts', (event, network, id, value) => { trusted(event); return local.contacts(network, id, value); });
+  ipcMain.handle('save-account', (event, network, value) => { trusted(event); return local.account(network, value); });
+  ipcMain.handle('open-data-directory', async event => { trusted(event); fs.mkdirSync(app.getPath('userData'), { recursive: true }); return shell.openPath(app.getPath('userData')); });
   ipcMain.handle('load-session', (event, network) => { trusted(event); return sessions.get(network); });
   ipcMain.handle('save-session', (event, network, token, server) => { trusted(event); return sessions.set(network, token, server); });
   ipcMain.handle('last-session', event => { trusted(event); return sessions.last(); });
@@ -47,7 +85,12 @@ function registerIPC() {
   ipcMain.handle('sources', async event => {
     trusted(event);
     const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 360, height: 200 } });
-    return sources.map(s => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL(), displayId: s.display_id }));
+    return sources.map(s => {
+      const display = screen.getAllDisplays().find(d => String(d.id) === s.display_id);
+      return { id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL(), displayId: s.display_id,
+        width: display ? Math.round(display.size.width * display.scaleFactor) : null,
+        height: display ? Math.round(display.size.height * display.scaleFactor) : null, fps: display?.displayFrequency || null };
+    });
   });
   ipcMain.handle('select-source', async (event, id) => {
     trusted(event); revoke(false);
@@ -115,6 +158,7 @@ app.whenReady().then(() => {
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
   sessions = new (require('./session-store.cjs').SessionStore)(path.join(app.getPath('userData'), 'sessions.enc'), safeStorage);
+  local = new (require('./local-store.cjs').LocalStore)(app.getPath('userData'));
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(wc === win?.webContents && ['media', 'display-capture', 'fullscreen', 'pointerLock'].includes(permission)));
   session.defaultSession.setPermissionCheckHandler((wc, permission) => wc === win?.webContents && ['media', 'display-capture', 'fullscreen', 'pointerLock'].includes(permission));
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {

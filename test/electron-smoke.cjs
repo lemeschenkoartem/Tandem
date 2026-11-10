@@ -14,6 +14,10 @@ app.on('browser-window-created', (_, window) => {
         const env = await window.tandem.environment();
         window.testNativeExitCount = 0; window.tandem.onExitFullscreen(() => { window.testNativeExitCount++; });
         await window.tandem.loadSession('a'.repeat(32));
+        await window.tandem.saveSettings({ resolution: '1920x1080', fps: 120, bitrate: 60, codec: 'auto', qualityMode: 'adaptive', audio: false, ice: [] });
+        if ((await window.tandem.loadSettings()).qualityMode !== 'adaptive') throw new Error('Native settings JSON roundtrip failed');
+        await window.tandem.saveContacts('a'.repeat(32), '12345678', { friends: [{ id: '87654321', name: 'friend', online: true }], incoming: [], outgoing: [] });
+        if ((await window.tandem.loadContacts('a'.repeat(32), '12345678')).friends[0].id !== '87654321') throw new Error('Native friends JSON roundtrip failed');
         await window.tandem.startRelay('ws://127.0.0.1:8787');
         const account = await new Promise((resolve, reject) => {
           const ws = new WebSocket('ws://127.0.0.1:8787');

@@ -42,7 +42,7 @@ test('failed lookup, rejection and leaving a room preserve authentication and al
     owner.send({ type: 'register', name: 'owner', password: 'owner-password-123' });
     const identity = (await owner.next()).account;
     guest.send({ type: 'register', name: 'friend', password: 'friend-password-123' }); await guest.next();
-    assert.equal(owner.hello.protocol, 3); assert.equal(owner.hello.network, guest.hello.network);
+    assert.equal(owner.hello.protocol, 4); assert.equal(owner.hello.network, guest.hello.network);
     guest.send({ type: 'find', id: '00000000' });
     const failure = await guest.next(); assert.equal(failure.code, 'ID_NOT_FOUND'); assert.equal(failure.request, 'find');
     owner.send({ type: 'create' }); await owner.next();
@@ -71,7 +71,7 @@ test('ID search requires authentication; host approval gates media and duplicate
       client.send({ type: 'register', name, password: `${name}-password-123` }); const response = await client.next();
       assert.equal(response.type, 'authenticated'); accounts.push(response.account);
     }
-    guest.send({ type: 'find', id: accounts[0].id }); assert.equal((await guest.next()).online, false);
+    guest.send({ type: 'find', id: accounts[0].id }); assert.equal((await guest.next()).online, true);
     owner.send({ type: 'create' }); assert.equal((await owner.next()).id, accounts[0].id);
     guest.send({ type: 'find', id: accounts[0].id }); const found = await guest.next(); assert.equal(found.online, true); assert.equal(found.account.name, 'owner');
     guest.send({ type: 'join-id', id: accounts[0].id }); assert.equal((await guest.next()).type, 'join-pending');

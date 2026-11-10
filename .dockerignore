@@ -1,0 +1,9 @@
+node_modules
+release
+artifacts
+.git
+*.log
+*.sqlite*
+*.enc
+server/data
+.env

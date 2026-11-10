@@ -1,4 +1,3 @@
-# Replace relay.example.com with your own DNS name pointing to this server.
-relay.example.com {
-    reverse_proxy 127.0.0.1:8787
+{$TANDEM_DOMAIN} {
+    reverse_proxy tandem:8787
 }
