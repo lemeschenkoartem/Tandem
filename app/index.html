@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src ws: wss:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Tandem — играйте вместе</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#" aria-label="Tandem"><span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></span>tandem<span class="brand-dot">.</span></a>
+    <div class="edition">PLAY TOGETHER · WINDOWS</div>
+    <nav>
+      <button class="nav-item active" data-view="session"><span>▣</span> Ваша сеть</button>
+      <button class="nav-item" data-view="settings"><span>☷</span> Качество и сеть</button>
+      <button class="nav-item" data-view="accounts"><span>♙</span> Мой аккаунт</button>
+      <button class="nav-item" data-view="guide"><span>ⓘ</span> Как играть</button>
+    </nav>
+    <div class="sidebar-bottom"><div class="version">РАННЯЯ ВЕРСИЯ <span>0.1.1</span></div><p>Ваш компьютер.<br>Ваша компания.</p><div class="local-user"><span class="avatar">Т</span><div><strong id="account-label">Вы не вошли</strong><small id="platform-label">Windows 10 / 11</small></div></div></div>
+  </aside>
+  <main>
+    <header class="topbar"><span><i id="status-dot" class="dot"></i><span id="status">Готов к подключению</span></span><span class="topbar-right">ДЛЯ ДВОИХ <span class="small-pill">P2P · WebRTC</span></span></header>
+    <section id="view-session" class="view"><div class="network-context"><span id="connection-server"></span><span>ID ищется только в общей сети. Друг создал свою сеть? Вставьте его приглашение целиком.</span></div>
+      <div class="heading"><div><div class="eyebrow">РАССТОЯНИЕ НЕ В СЧЁТ</div><h1>На одной волне<span>.</span></h1><p>Один экран. Два игрока. Ваша следующая катка.</p></div><span class="heading-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5 5 19M5 5v14h14"/></svg></span></div>
+      <div class="session-layout">
+        <section class="panel connection-panel">
+          <div class="panel-header"><h2>Ваша игровая сеть</h2><span class="tag">PRIVATE</span></div>
+          <div id="connection-idle">
+            <p class="muted">Создайте сеть и отправьте другу приглашение с её адресом. Если вы уже на одном сервере, достаточно ID.</p>
+            <label for="source-summary">ПРОФИЛЬ ТРАНСЛЯЦИИ</label>
+            <button id="source-summary" class="profile-button"><span class="profile-icon">▤</span><span><strong id="profile-title">1080p / 120 FPS</strong><small>Настроить качество и частоту</small></span><span>&gt;</span></button>
+            <button id="create" class="button primary wide"><span>＋</span> Создать сеть</button>
+            <div class="divider"><span>или подключитесь</span></div>
+            <label for="invite-input">ID ДРУГА ИЛИ ПРИГЛАШЕНИЕ</label>
+            <input id="invite-input" maxlength="4096" placeholder="12345678 или tandem://connect/…" spellcheck="false" autocomplete="off">
+            <button id="join" class="button secondary wide">Найти друга <span>&gt;</span></button><p id="friend-result" class="hint" role="status"></p><button id="connect-friend" class="button primary wide" hidden>Запросить подключение</button>
+          </div>
+          <div id="connection-active" hidden>
+            <div class="network-identity"><span class="network-symbol">⌘</span><strong id="network-title">Ваша сеть</strong><p id="peer-label">Ожидаем друга</p></div>
+            <div id="invitation-box"><label for="invite-output">ВАШ ПОСТОЯННЫЙ ID</label><input id="invite-output" class="id-display" readonly><button id="copy" class="button secondary wide">Скопировать приглашение</button><p class="hint">Друг вставляет приглашение целиком в поле «ID или приглашение». Оно содержит адрес общей сети; пароль не передаётся.</p></div>
+            <div class="control-state"><i class="dot"></i><span id="control-status">Управление у владельца</span></div>
+            <button id="request-control" class="button primary wide" hidden>Запросить управление</button>
+            <button id="revoke-control" class="button secondary wide" hidden>Забрать управление</button>
+            <button id="share-screen" class="button secondary wide" hidden>Показать мой экран</button>
+            <button id="leave" class="button danger wide">Завершить подключение</button>
+          </div>
+          <div class="private-note"><span>◇</span><span>Аккаунт с постоянным ID. Просмотр и управление — с вашего согласия.</span></div>
+        </section>
+        <div class="stream-column">
+          <section id="stage" class="stage" tabindex="0" aria-label="Экран друга">
+            <video id="video" autoplay playsinline hidden></video>
+            <div id="stage-idle" class="stage-idle"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="screen-art"><div class="art-screen back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></div><div class="art-screen front"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg><i></i></div><div class="art-spark">✦</div></div><h2>Ваш друг — в одном клике</h2><p id="stage-message">Создайте сеть, чтобы начать трансляцию</p><span class="stage-badge"><i class="dot"></i> ПОЛНЫЙ ЭКРАН · ДО 4K · ДО 240 FPS*</span></div>
+            <div id="stream-overlay" class="stream-overlay" hidden><span id="stream-role">Ваш экран</span><span id="stream-mode"></span></div>
+          </section>
+          <div class="stream-toolbar"><span id="stream-caption">* Доступный режим зависит от захвата и оборудования</span><div><button id="sound" class="icon-button" title="Выключить звук" hidden>Звук: вкл.</button><button id="mouse-lock" class="icon-button" title="Для игр от первого лица" hidden>Захват мыши</button><button id="fullscreen" class="icon-button" title="Полный экран">⛶</button></div></div>
+          <div class="stats"><div><small>СЕТЬ · RTT</small><strong id="stat-rtt">—<em> мс</em></strong></div><div><small>ПОТОК</small><strong id="stat-fps">—<em> FPS</em></strong></div><div><small>БИТРЕЙТ</small><strong id="stat-bitrate">—<em> Мбит/с</em></strong></div><div><small>ПОТЕРИ</small><strong id="stat-loss">—<em> %</em></strong></div></div>
+          <p id="metrics-detail" class="hint metrics-detail">Показатели появятся после подключения. RTT — время туда и обратно, не полная задержка управления.</p>
+        </div>
+      </div>
+      <div class="footer-note"><span>01 <b>Создайте сеть</b></span><i>→</i><span>02 <b>Передайте приглашение</b></span><i>→</i><span>03 <b>Примите подключение и играйте</b></span><span class="escape-hint"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>F12</kbd> вернуть управление</span></div>
+    </section>
+    <section id="view-settings" class="view" hidden>
+      <div class="heading"><div><div class="eyebrow">БОЛЬШЕ КАДРОВ. МЕНЬШЕ ОЖИДАНИЯ.</div><h1>На вашей скорости<span>.</span></h1><p>Настройки применятся к следующей трансляции.</p></div></div>
+      <div class="settings-grid"><section class="panel settings-panel"><h2>Качество трансляции</h2><div class="field-row"><div><label for="resolution">РАЗРЕШЕНИЕ</label><select id="resolution"><option value="1920x1080">Full HD · 1920 × 1080</option><option value="2560x1440">QHD · 2560 × 1440</option><option value="3840x2160">4K · 3840 × 2160</option></select></div><div><label for="fps">ЧАСТОТА КАДРОВ</label><select id="fps"><option>60</option><option>90</option><option selected>120</option><option>144</option><option>165</option><option>240</option></select></div></div><label for="bitrate">МАКСИМАЛЬНЫЙ БИТРЕЙТ, МБИТ/С</label><input id="bitrate" type="number" min="5" max="250" value="35"><p class="hint">1080p/120: начните с 25–45. 4K/120: 80–150 при достаточной скорости отдачи. Больше битрейт — больше нагрузка на сеть.</p><label for="codec">ПРЕДПОЧТИТЕЛЬНЫЙ КОДЕК</label><select id="codec"><option value="H264">H.264 · приоритет низкой задержки</option><option value="auto">Выбор WebRTC</option><option value="VP9">VP9</option><option value="AV1">AV1 · экспериментально</option></select><label class="check-label"><input id="audio" type="checkbox" checked> Передавать системный звук</label><div class="notice">144–240 FPS — экспериментальные режимы. Захват ограничен частотой монитора и возможностями Chromium. Картинка не увеличивается выше исходного разрешения. Смотрите фактические параметры потока.</div></section>
+      <section class="panel settings-panel"><h2>Общий сервер для двух ПК</h2><div class="notice">По умолчанию каждый клиент запускает собственный сервер. Чтобы видеть друг друга, используйте адрес одного ПК. Передайте другу приглашение: адрес заполнится автоматически. Интернет-соединение с этим ПК требует Tailscale, Radmin VPN либо публичного сервера.</div><label for="server">АДРЕС СЕРВЕРА</label><input id="server" placeholder="ws://100.x.x.x:8787" spellcheck="false"><label class="check-label"><input id="embedded" type="checkbox" checked> Запустить встроенный сервер на этом компьютере</label><p class="hint">Для разных квартир установите один VPN на оба компьютера: Tailscale (100.x.x.x) или Radmin VPN (26.x.x.x). Укажите VPN-адрес владельца сервера на обоих ПК. Откройте TCP 8787 для частной сети в брандмауэре Windows. На компьютере друга встроенный сервер не нужен.</p><label for="ice">ICE-СЕРВЕРЫ · JSON</label><textarea id="ice" rows="5" spellcheck="false">[{"urls":"stun:stun.l.google.com:19302"}]</textarea><p class="hint">TURN нужен, если прямой путь не установился. Видео и ввод идут по WebRTC, сервер сети хранит аккаунты и передаёт сообщения соединения.</p><button id="save-settings" class="button primary wide">Сохранить настройки</button><p id="settings-result" class="hint" role="status"></p></section>
+</div>
+    </section>
+    <section id="view-accounts" class="view" hidden><div class="heading"><div><div class="eyebrow">ВАШ НОМЕР В СЕТИ</div><h1>Всегда на связи<span>.</span></h1><p>Создайте аккаунт, получите ID и отправьте его другу.</p></div></div><section class="panel settings-panel account-panel"><h2>Ваш постоянный ID</h2><div id="own-id" class="own-id">—</div><p id="own-id-hint">Войдите на общий сервер. ID присваивается при регистрации и сохраняется за аккаунтом.</p><button id="account-login" class="button primary">Войти или создать аккаунт</button><button id="copy-account-invite" class="button primary" hidden>Приглашение в мою сеть</button><button id="copy-own-id" class="button secondary" hidden>Скопировать мой ID</button><button id="account-logout" class="button secondary" hidden>Выйти из аккаунта</button></section></section>
+    <section id="view-guide" class="view" hidden><div class="heading"><div><div class="eyebrow">БЫСТРЫЙ СТАРТ</div><h1>Собирайтесь играть<span>.</span></h1><p>Одинаковое приложение у обоих, одна закрытая сеть.</p></div></div><div class="guide-grid"><section class="panel settings-panel"><span class="step-number">01</span><h2>Соедините компьютеры</h2><p>В одной локальной сети используйте IP владельца сервера. Через интернет используйте один VPN: Tailscale (адрес владельца 100.x.x.x) или Radmin VPN (26.x.x.x). Подключите оба ПК к одной VPN-сети и проверьте доступность друг друга.</p><p>В «Качество и сеть» укажите ws://этот-IP:8787. При публичном сервере требуется wss://. Tandem передаёт экран и ввод, а Tailscale обеспечивает сетевую связность.</p></section><section class="panel settings-panel"><span class="step-number">02</span><h2>Получите свой ID</h2><p>Один из вас запускает встроенный сервер. Оба указывают его адрес в «Качество и сеть». На компьютере друга отключите встроенный сервер. Аккаунты и поиск ID работают в пределах этого общего сервера.</p><p>Войдите или создайте аккаунт в разделе «Мой аккаунт». При регистрации сразу присваивается постоянный ID из 8 цифр. Нажмите «Создать сеть», выберите монитор и нажмите «Скопировать приглашение». Друг вставляет приглашение целиком в поле «ID или приглашение». Оно выбирает правильный сервер; при первом переходе друг регистрирует аккаунт в этой сети. После этого поиск по 8-значному ID не требует повторного входа. Примите его запрос на подключение.</p></section><section class="panel settings-panel"><span class="step-number">03</span><h2>Передайте управление</h2><p>Друг нажимает «Запросить управление». Владелец разрешает клавиатуру и мышь. Для FPS-игр друг включает «Захват мыши»; Esc освобождает курсор.</p><p>Ctrl+Alt+F12 на компьютере владельца немедленно отзывает управление. Кнопка «Показать мой экран» меняет роли после согласия друга. При разрыве соединения нажатые клавиши отпускаются.</p></section><section class="panel settings-panel"><span class="step-number">04</span><h2>Подберите скорость</h2><p>Начните с 1080p/120, 35 Мбит/с и Ethernet на обоих ПК. Затем пробуйте 1440p и 4K. Частота монитора владельца должна быть не ниже выбранной.</p><p>Сравнивайте фактический FPS, RTT, потери и время декодирования. Античит, защищённый экран Windows и игры с повышенными правами могут блокировать ввод. Геймпады и виртуальный LAN-адаптер в этой версии не поддерживаются.</p></section></div></section>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </main>
+  <dialog id="auth-dialog"><form id="auth-form"><div class="eyebrow">ВАША ЧАСТНАЯ СЕТЬ</div><h2>Сначала познакомимся</h2><p id="auth-server" class="hint"></p><label for="login-name">ЛОГИН</label><input id="login-name" autocomplete="username" minlength="3" maxlength="24" required pattern="[a-zA-Z0-9_]{3,24}" placeholder="player_one"><label for="login-password">ПАРОЛЬ</label><input id="login-password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required placeholder="Не меньше 10 символов"><p id="auth-result" class="auth-result" role="status">Без почты и кодов. При регистрации сразу получите ID из 8 цифр.</p><div class="dialog-actions"><button type="button" id="auth-register" class="button secondary">Создать аккаунт</button><button type="submit" id="auth-login" class="button primary">Войти</button></div><button type="button" id="auth-cancel" class="text-button">Отмена</button></form></dialog>
+  <dialog id="source-dialog"><div class="eyebrow">ЧЕМ ПОДЕЛИМСЯ?</div><h2>Выберите монитор</h2><p class="hint">Друг увидит весь этот монитор, включая открытые окна. Во время игры сверните Tandem, чтобы избежать зеркала.</p><div id="source-list" class="source-list"></div><button id="source-cancel" class="button secondary wide">Отмена</button></dialog>
+  <dialog id="confirm-dialog"><div class="eyebrow">РЕШЕНИЕ ЗА ВАМИ</div><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button id="confirm-no" class="button secondary">Отклонить</button><button id="confirm-yes" class="button primary">Разрешить</button></div></dialog>
+  <script src="network.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

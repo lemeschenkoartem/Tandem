@@ -1,0 +1,10 @@
+'use strict';
+const { createRelay } = require('./relay.cjs');
+const fs = require('node:fs');
+const path = require('node:path');
+const dataDirectory = process.env.DATA_DIRECTORY || path.join(__dirname, 'data');
+fs.mkdirSync(dataDirectory, { recursive: true });
+const port = Number(process.env.PORT || 8787);
+const relay = createRelay({ port, host: process.env.HOST || '0.0.0.0', databasePath: path.join(dataDirectory, 'accounts.sqlite') });
+relay.listen().then(() => console.log(`Tandem: signaling server listening on port ${port}`)).catch(error => { console.error(error.message); process.exitCode = 1; });
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => relay.close().then(() => process.exit(0)));

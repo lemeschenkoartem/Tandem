@@ -1,0 +1,28 @@
+{
+  "name": "tandem-play",
+  "version": "0.1.1",
+  "description": "Трансляция игры и совместное управление для двух друзей",
+  "private": true,
+  "main": "app/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/index.cjs",
+    "test": "node --test test/*.test.cjs",
+    "test:browser": "node test/browser.cjs",
+    "check": "node scripts/check.cjs",
+    "package:win": "node scripts/package.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "8.22.2",
+    "koffi": "3.3.7"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "@electron/packager": "20.3.0",
+    "playwright": "1.62.1"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,17 @@
+# Example for a separate public coturn server; not used by the client automatically.
+listening-port=3478
+realm=relay.example.com
+fingerprint
+lt-cred-mech
+# Set your own long random password before starting; never use this placeholder.
+user=tandem:REPLACE_WITH_A_LONG_RANDOM_PASSWORD
+min-port=49160
+max-port=49200
+no-cli
+no-multicast-peers
+no-tlsv1
+no-tlsv1_1
+# Set external-ip=PUBLIC_IP if required by your deployment.
+# Allow 3478 UDP/TCP and 49160-49200 UDP in the server firewall.
+# Client ICE JSON:
+# [{"urls":["turn:relay.example.com:3478?transport=udp","turn:relay.example.com:3478?transport=tcp"],"username":"tandem","credential":"YOUR_PASSWORD"}]
