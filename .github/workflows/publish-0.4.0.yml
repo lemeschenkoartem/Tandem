@@ -1,4 +1,4 @@
-name: Publish verified Tandem 0.4.0
+name: Build and publish verified Tandem 0.4.0 on Windows
 on:
   push:
     branches:
@@ -7,31 +7,76 @@ permissions:
   contents: write
 jobs:
   publish:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Read prepared source and release evidence
+      - name: Checkout tested application source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Retrieve and verify the prepared Windows archive
+      - name: Select Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Install locked Windows dependencies
+        run: npm ci
+      - name: Check syntax and run Windows unit tests
+        run: |
+          npm run check
+          npm test
+      - name: Build native Windows client
+        run: npm run package:win
+      - name: Verify packaged application files
+        run: |
+          node - <<'JS'
+          const fs = require('node:fs'), path = require('node:path');
+          (async () => {
+            const asar = await import('@electron/asar');
+            const archive = 'release/Tandem-win32-x64/resources/app.asar';
+            for (const name of fs.readdirSync('app')) {
+              if (!fs.statSync(path.join('app', name)).isFile()) continue;
+              if (!asar.extractFile(archive, 'app/' + name).equals(fs.readFileSync(path.join('app', name)))) throw new Error('Packaged source differs: ' + name);
+            }
+            if (JSON.parse(asar.extractFile(archive, 'package.json')).version !== '0.4.0') throw new Error('Incorrect version');
+            if (!fs.existsSync('release/Tandem-win32-x64/resources/app.asar.unpacked/node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node')) throw new Error('Missing Windows input binary');
+            console.log('Packaged application verified.');
+          })().catch(error => { console.error(error.message); process.exitCode = 1; });
+          JS
+      - name: Create release assets and checksums
         run: |
           mkdir -p release-assets
-          curl --fail --location --show-error --retry 2 --connect-timeout 30 --max-time 600 https://files.catbox.moe/6huobg.zip --output release-assets/Tandem-0.4.0-Windows-x64.zip
-          echo '33f932ba20aa4f907256f2b1c2e6a48627b23b401d672eb119b41c07e4de3b69  release-assets/Tandem-0.4.0-Windows-x64.zip' | sha256sum --check --strict
           git archive --format=zip --prefix=Tandem-source/ HEAD app server shared scripts test deploy package.json package-lock.json README.md START-HERE.txt LICENSE .gitignore .dockerignore > release-assets/Tandem-0.4.0-source.zip
           git archive --format=zip --prefix=Tandem-server/ HEAD server deploy package.json package-lock.json LICENSE .dockerignore > release-assets/Tandem-0.4.0-server.zip
           cp START-HERE.txt release-assets/Tandem-0.4.0-start.txt
           cp release-evidence/browser-test-0.4.0.json release-assets/Tandem-0.4.0-browser-test.json
-          cd release-assets
-          sha256sum Tandem-0.4.0-Windows-x64.zip Tandem-0.4.0-source.zip Tandem-0.4.0-server.zip Tandem-0.4.0-start.txt Tandem-0.4.0-browser-test.json > SHA256SUMS.txt
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib
+          client = Path('release/Tandem-win32-x64'); assets = Path('release-assets')
+          archive = assets/'Tandem-0.4.0-Windows-x64.zip'
+          with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as output:
+            for source in sorted(client.rglob('*')):
+              if source.is_file(): output.write(source, Path('Tandem')/source.relative_to(client))
+          with zipfile.ZipFile(archive) as output:
+            assert output.testzip() is None
+            assert not any('sessions.enc' in name or 'accounts.sqlite' in name or name.endswith('.log') for name in output.namelist())
+          checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+          (assets/'Windows.sha256').write_text(checksum)
+          names = ['Tandem-0.4.0-Windows-x64.zip','Tandem-0.4.0-source.zip','Tandem-0.4.0-server.zip','Tandem-0.4.0-start.txt','Tandem-0.4.0-browser-test.json']
+          (assets/'SHA256SUMS.txt').write_text(''.join(hashlib.sha256((assets/name).read_bytes()).hexdigest()+'  '+name+'\n' for name in names))
+          print('Windows ZIP:', archive.stat().st_size, 'bytes; SHA-256:', checksum)
+          PY
       - name: Upload and publish verified release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload v0.4.0 release-assets/* --clobber
+          gh release upload v0.4.0 release-assets/*.zip release-assets/*.txt release-assets/*.json --clobber
           asset_api_url="$(gh release view v0.4.0 --json assets --jq '.assets[] | select(.name == "Tandem-0.4.0-Windows-x64.zip") | .apiUrl')"
           digest="$(gh api "$asset_api_url" --jq '.digest')"
-          test "$digest" = 'sha256:33f932ba20aa4f907256f2b1c2e6a48627b23b401d672eb119b41c07e4de3b69'
+          expected_sha="$(cat release-assets/Windows.sha256)"
+          test "$digest" = "sha256:$expected_sha"
           gh release edit v0.4.0 --draft=false --prerelease
