@@ -1,0 +1,37 @@
+name: Publish verified Tandem 0.4.0
+on:
+  push:
+    branches:
+      - upload/windows-0.4.0
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Read prepared source and release evidence
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Retrieve and verify the prepared Windows archive
+        run: |
+          mkdir -p release-assets
+          curl --fail --location --show-error --retry 2 --connect-timeout 30 --max-time 600 https://files.catbox.moe/6huobg.zip --output release-assets/Tandem-0.4.0-Windows-x64.zip
+          echo '33f932ba20aa4f907256f2b1c2e6a48627b23b401d672eb119b41c07e4de3b69  release-assets/Tandem-0.4.0-Windows-x64.zip' | sha256sum --check --strict
+          git archive --format=zip --prefix=Tandem-source/ HEAD app server shared scripts test deploy package.json package-lock.json README.md START-HERE.txt LICENSE .gitignore .dockerignore > release-assets/Tandem-0.4.0-source.zip
+          git archive --format=zip --prefix=Tandem-server/ HEAD server deploy package.json package-lock.json LICENSE .dockerignore > release-assets/Tandem-0.4.0-server.zip
+          cp START-HERE.txt release-assets/Tandem-0.4.0-start.txt
+          cp release-evidence/browser-test-0.4.0.json release-assets/Tandem-0.4.0-browser-test.json
+          cd release-assets
+          sha256sum Tandem-0.4.0-Windows-x64.zip Tandem-0.4.0-source.zip Tandem-0.4.0-server.zip Tandem-0.4.0-start.txt Tandem-0.4.0-browser-test.json > SHA256SUMS.txt
+      - name: Upload and publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload v0.4.0 release-assets/* --clobber
+          asset_api_url="$(gh release view v0.4.0 --json assets --jq '.assets[] | select(.name == "Tandem-0.4.0-Windows-x64.zip") | .apiUrl')"
+          digest="$(gh api "$asset_api_url" --jq '.digest')"
+          test "$digest" = 'sha256:33f932ba20aa4f907256f2b1c2e6a48627b23b401d672eb119b41c07e4de3b69'
+          gh release edit v0.4.0 --draft=false --prerelease

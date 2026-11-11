@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "tested": [
+    "no host/IP fields in the normal interface",
+    "account ID search without repeated login",
+    "friend request, explicit acceptance and local JSON persistence across restart",
+    "view request rejection and retry without pre-creating a room",
+    "actual 1080p video and input after separate owner approvals",
+    "fullscreen edges, Ctrl+F12 and owner emergency revoke",
+    "live manual HD/20Mbps update with owner consent",
+    "adaptive congestion reduction and gradual recovery on a real sender using injected RTT stats",
+    "auto changes preserve the saved user ceiling",
+    "fresh decoder feedback over data channel",
+    "established game survives signaling loss and supports role swap",
+    "both users can host and control",
+    "4K/240 limits and settings confirmation",
+    "direct offer/answer file fallback without guest account",
+    "TURN allocation probe and forced relay policy",
+    "readable local logs without credentials or full invitations",
+    "performance report export with real stream statistics",
+    "Tailscale probe IPC wiring (native command parsing tested separately)"
+  ],
+  "inputEvents": 23,
+  "browserErrors": [],
+  "consoleErrors": []
+}
