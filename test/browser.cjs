@@ -14,7 +14,7 @@ let hostGranted = false, guestGranted = false;
 const relay = createRelay({ port: 0, host: '127.0.0.1' });
 const dataDirectory = fs.mkdtempSync('/tmp/tandem-browser-');
 const staticServer = http.createServer((req, res) => {
-  const file = { '/': 'index.html', '/renderer.js': 'renderer.js', '/network.js': 'network.js', '/logging.js': 'logging.js', '/quality.js': 'quality.js', '/adaptive.js': 'adaptive.js', '/player.js': 'player.js', '/styles.css': 'styles.css' }[req.url];
+  const file = { '/': 'index.html', '/renderer.js': 'renderer.js', '/network.js': 'network.js', '/logging.js': 'logging.js', '/quality.js': 'quality.js', '/adaptive.js': 'adaptive.js', '/performance.js': 'performance.js', '/player.js': 'player.js', '/styles.css': 'styles.css' }[req.url];
   if (req.url === '/favicon.ico') { res.writeHead(204); res.end(); return; }
   if (!file) { res.writeHead(404); res.end(); return; }
   res.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
@@ -46,6 +46,8 @@ async function setupContext(name, defaultServer) {
     const png = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#554477"/></svg>');
     window.tandem = {
       environment: async () => ({ platform: 'win32', version: 'test', addresses: ['127.0.0.1'], defaultServer, emergencyShortcutAvailable: true }),
+      probeTailscale: async () => ({ available:true, path:'direct', reason:'Подтверждён прямой путь Tailscale в тесте IPC', ping:{count:5,medianMs:5,p95Ms:6} }),
+      savePerformanceReport: async text => { window.savedPerformanceReport = text; return 'test-report.txt'; },
       logEvent: (event, data) => window.nativeAction('log', { event, data }),
       openLog: () => window.nativeAction('open-log'),
       loadSettings: () => window.nativeAction('load-settings'),
@@ -168,7 +170,11 @@ async function connectFriend(guest, host, accept = true) {
   assert.match(afterCongestion.reason, /Канал|Потери/);
   await host.evaluate(() => { window.testCongestion = false; });
   await host.waitForFunction(rate => runtimeProfile.bitrate > rate, afterCongestion.rate, { timeout: 25000 });
-  await host.waitForFunction(() => receiverStats !== null); assert.equal(await guest.locator('#auth-dialog').isVisible(), false);
+  await host.waitForFunction(() => receiverStats !== null);
+  await host.click('#copy-performance'); const readableReport = await host.evaluate(() => window.copiedInvitation); assert.match(readableReport, /Сетевая RTT/); assert.match(readableReport, /не складываются/);
+  await host.click('#save-performance'); assert.match(await host.evaluate(() => window.savedPerformanceReport), /Tandem — отчёт/);
+  await host.evaluate(() => { latestSample.path.network='tailscale'; latestSample.path.peerAddress='100.90.1.2'; }); await host.click('#probe-route'); await host.waitForFunction(() => document.getElementById('route-result').textContent.includes('Подтверждён прямой путь'));
+ assert.equal(await guest.locator('#auth-dialog').isVisible(), false);
   // A signaling outage does not interrupt an already established game or role swap.
   await host.evaluate(() => ws.close()); await host.waitForTimeout(250); assert.equal(await guest.evaluate(() => pc?.connectionState), 'connected');
   await host.waitForFunction(id => account?.id === id, ownerId, { timeout: 15000 });
@@ -204,7 +210,7 @@ async function connectFriend(guest, host, accept = true) {
   assert.match(logText, /TURN доступен и выделил маршрут/); assert.match(logText, /Ответ друга применён/);
   assert.ok(!logText.includes('tandem:\/\/direct\/')); assert.ok(!logText.includes('test-local-only')); assert.ok(logText.endsWith('\n'));
   assert.deepEqual(errors, []); assert.deepEqual(traces, []);
-  const report = { ok: true, tested: ['no host/IP fields in the normal interface', 'account ID search without repeated login', 'friend request, explicit acceptance and local JSON persistence across restart', 'view request rejection and retry without pre-creating a room', 'actual 1080p video and input after separate owner approvals', 'fullscreen edges, Ctrl+F12 and owner emergency revoke', 'live manual HD/20Mbps update with owner consent', 'adaptive congestion reduction and gradual recovery on a real sender using injected RTT stats', 'auto changes preserve the saved user ceiling', 'fresh decoder feedback over data channel', 'established game survives signaling loss and supports role swap', 'both users can host and control', '4K/240 limits and settings confirmation', 'direct offer/answer file fallback without guest account', 'TURN allocation probe and forced relay policy', 'readable local logs without credentials or full invitations'], inputEvents: inputs.length, browserErrors: errors, consoleErrors: traces };
+  const report = { ok: true, tested: ['no host/IP fields in the normal interface', 'account ID search without repeated login', 'friend request, explicit acceptance and local JSON persistence across restart', 'view request rejection and retry without pre-creating a room', 'actual 1080p video and input after separate owner approvals', 'fullscreen edges, Ctrl+F12 and owner emergency revoke', 'live manual HD/20Mbps update with owner consent', 'adaptive congestion reduction and gradual recovery on a real sender using injected RTT stats', 'auto changes preserve the saved user ceiling', 'fresh decoder feedback over data channel', 'established game survives signaling loss and supports role swap', 'both users can host and control', '4K/240 limits and settings confirmation', 'direct offer/answer file fallback without guest account', 'TURN allocation probe and forced relay policy', 'readable local logs without credentials or full invitations', 'performance report export with real stream statistics', 'Tailscale probe IPC wiring (native command parsing tested separately)'], inputEvents: inputs.length, browserErrors: errors, consoleErrors: traces };
   fs.writeFileSync(path.join(root, 'artifacts', 'browser-test.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report, null, 2));
 })().catch(async error => { console.error(error); console.error({ errors, traces }); for (const page of pages) { try { console.error(await page.evaluate(() => ({status: document.getElementById('status').textContent, toast: document.getElementById('toast').textContent, role, peerReady, pc: pc?.connectionState, signal: pc?.signalingState, ice: pc?.iceConnectionState, v: {w: document.getElementById('video').videoWidth,h: document.getElementById('video').videoHeight,t: document.getElementById('video').currentTime}, stream: stream?.getTracks().map(t=>t.getSettings()), stats: document.getElementById('metrics-detail').textContent}))); } catch {} } process.exitCode = 1; }).finally(async () => {
   await browser?.close(); await relay.close(); for (const logger of loggers) await logger.close(); fs.rmSync(dataDirectory, { recursive: true, force: true }); await new Promise(resolve => staticServer.close(resolve));

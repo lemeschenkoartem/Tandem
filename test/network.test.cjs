@@ -25,3 +25,11 @@ test('invitation parsing rejects executable URLs, public unencrypted servers and
   for (const server of ['javascript:alert(1)', 'https://example.com', 'ws://example.com:8787', 'wss://user:password@example.com', 'wss://example.com/other']) assert.throws(() => normalizeServer(server));
   for (const input of ['1234567', 'tandem://connect/bad', 'tandem://connect/' + btoa(JSON.stringify({ v: 1, id: '12345678', network: 'bad', server: 'ws://26.1.2.3:8787' }))]) assert.throws(() => parseTarget(input));
 });
+
+test('manual invitations preserve Tailscale by default and explicit UDP/no-VPN filters work including IPv6', () => {
+ const {filterCandidates,iceConfiguration}=require('../app/network.js');
+ const sdp='v=0\r\na=candidate:1 1 udp 1 100.90.0.1 5000 typ host\r\na=candidate:2 1 udp 1 fd7a:115c:a1e0::1 5001 typ host\r\na=candidate:3 1 tcp 1 192.168.1.2 5002 typ host\r\n';
+ assert.equal(filterCandidates(sdp),sdp); assert.ok(!filterCandidates(sdp,{allowVPN:false}).includes('100.90.0.1')); assert.ok(!filterCandidates(sdp,{allowVPN:false}).includes('fd7a:')); assert.ok(!filterCandidates(sdp,{transport:'udp'}).includes('1 tcp'));
+ const config=iceConfiguration([{urls:['turn:example.com:3478?transport=udp','turn:example.com:3478?transport=tcp','turns:example.com:443?transport=tcp'],username:'test',credential:'test'}],'udp');
+ assert.deepEqual(config.iceServers[0].urls,['turn:example.com:3478?transport=udp']);
+});

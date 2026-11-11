@@ -13,6 +13,8 @@ app.on('browser-window-created', (_, window) => {
       const result = await window.webContents.executeJavaScript(`(async () => {
         const env = await window.tandem.environment();
         window.testNativeExitCount = 0; window.tandem.onExitFullscreen(() => { window.testNativeExitCount++; });
+        const reportPath = await window.tandem.savePerformanceReport(['Tandem — отчёт об отклике и качестве','Проверка IPC'].join(String.fromCharCode(10)));
+        if (env.platform !== 'win32' && (await window.tandem.probeTailscale('100.90.1.2')).available !== false) throw new Error('Unexpected native Tailscale probe');
         await window.tandem.logEvent('action', { action: 'Проверка настоящего IPC журнала' });
         await window.tandem.loadSession('a'.repeat(32));
         await window.tandem.saveSettings({ resolution: '1920x1080', fps: 120, bitrate: 60, codec: 'auto', qualityMode: 'adaptive', audio: false, ice: [] });
@@ -26,11 +28,12 @@ app.on('browser-window-created', (_, window) => {
           ws.onmessage = event => { const data = JSON.parse(event.data); if (data.type === 'hello') return; ws.close(); data.type === 'authenticated' ? resolve(data.account) : reject(new Error(data.message)); };
           ws.onerror = () => reject(new Error('websocket failed'));
         });
-        return { title: document.title, bridge: typeof window.tandem.input, version: env.version, account, status: document.getElementById('status').textContent };
+        return { reportPath, title: document.title, bridge: typeof window.tandem.input, version: env.version, account, status: document.getElementById('status').textContent };
       })()`);
       window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'F12', modifiers: ['control'] });
       await new Promise(resolve => setTimeout(resolve, 100));
       result.nativeFullscreenShortcut = await window.webContents.executeJavaScript('window.testNativeExitCount > 0');
+      if (!fs.readFileSync(result.reportPath, 'utf8').includes('Проверка IPC')) throw new Error('Native performance report IPC failed');
       if (!result.nativeFullscreenShortcut) throw new Error('Native Ctrl+F12 shortcut did not reach renderer');
       if (!/^[0-9]{8}$/.test(result.account.id)) throw new Error('Invalid account ID');
       if (!fs.existsSync(path.join(directory, 'logs', 'tandem.log'))) { await new Promise(resolve => setTimeout(resolve, 300)); }

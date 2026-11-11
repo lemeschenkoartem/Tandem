@@ -3,7 +3,7 @@
 // No password, session token or TURN credentials are included.
 (() => {
   function iceConfiguration(servers, mode = 'auto') {
-    if (!Array.isArray(servers) || servers.length > 8 || !['auto', 'relay'].includes(mode)) throw new Error('Проверьте список ICE-серверов и режим соединения.');
+    if (!Array.isArray(servers) || servers.length > 8 || !['auto', 'udp', 'relay'].includes(mode)) throw new Error('Проверьте список ICE-серверов и режим соединения.');
     let turns = 0;
     const iceServers = servers.map(server => {
       if (!server || typeof server !== 'object') throw new Error('Каждый ICE-сервер должен быть объектом с адресом urls.');
@@ -20,7 +20,20 @@
       return { urls };
     });
     if (mode === 'relay' && !turns) throw new Error('Выбран режим «Только TURN», но TURN-сервер ещё не задан. Добавьте адрес, username и credential.');
-    return { iceServers, iceTransportPolicy: mode === 'relay' ? 'relay' : 'all', bundlePolicy: 'max-bundle' };
+    const selected = mode === 'udp' ? iceServers.map(server => ({ ...server, urls: server.urls.filter(url => !/^turns:|^stuns:/i.test(url) && !/transport=tcp/i.test(url)) })).filter(server => server.urls.length) : iceServers;
+    return { iceServers: selected, iceTransportPolicy: mode === 'relay' ? 'relay' : 'all', bundlePolicy: 'max-bundle' };
+  }
+  function vpnAddress(ip) {
+    if (typeof ip !== 'string') return null;
+    if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip) || /^fd7a:115c:a1e0:/i.test(ip)) return 'tailscale';
+    return /^26\./.test(ip) ? 'radmin' : null;
+  }
+  function filterCandidates(sdp, { allowVPN = true, transport = 'auto' } = {}) {
+    return sdp.split('\r\n').filter(line => {
+      if (!line.startsWith('a=candidate:')) return true;
+      const parts = line.split(/\s+/);
+      return (transport !== 'udp' || parts[2]?.toLowerCase() === 'udp') && (allowVPN || !vpnAddress(parts[4]));
+    }).join('\r\n');
   }
   function normalizeServer(value) {
     let url;
@@ -75,7 +88,7 @@
       return !vpn(parts[4]) && !(related >= 0 && vpn(parts[related + 1]));
     }).join('\r\n');
   }
-  const exported = { normalizeServer, createInvitation, parseTarget, createDirectPacket, parseDirectPacket, withoutVPN, iceConfiguration };
+  const exported = { normalizeServer, createInvitation, parseTarget, createDirectPacket, parseDirectPacket, withoutVPN, iceConfiguration, vpnAddress, filterCandidates };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else globalThis.TandemNetwork = exported;
 })();

@@ -12,6 +12,7 @@ let sessions;
 let local;
 let servicePromise;
 let logger, logError = null, quitting = false;
+let routeProbeBusy = false;
 const friendlyError = require('./logging.js').error;
 async function serviceConfiguration() {
   if (servicePromise) return servicePromise;
@@ -68,6 +69,26 @@ function registerIPC() {
     if (!logger) throw new Error('Журнал недоступен: ' + (logError || 'не удалось создать файл'));
     await logger.flush(); if (logger.error) throw new Error('Не удалось записать журнал. Код: ' + logger.error);
     const result = await shell.openPath(logger.filename); if (result) throw new Error('Не удалось открыть журнал. Откройте файл через папку данных.'); return true;
+  });
+  ipcMain.handle('probe-tailscale', async (event, ip) => {
+    trusted(event);
+    if (routeProbeBusy) throw new Error('Проверка маршрута уже выполняется.');
+    routeProbeBusy = true;
+    try {
+      const result = await require('./tailscale.cjs').probe(ip);
+      logger?.record('network_probe', { result: result.reason, route: result.path, rtt: result.ping?.medianMs, p95: result.ping?.p95Ms });
+      return result;
+    } finally { routeProbeBusy = false; }
+  });
+  ipcMain.handle('save-performance-report', async (event, text) => {
+    trusted(event);
+    if (typeof text !== 'string' || !text.startsWith('Tandem — отчёт') || Buffer.byteLength(text) > 256 * 1024) throw new Error('Некорректный отчёт.');
+    const directory = path.join(app.getPath('userData'), 'reports');
+    await fs.promises.mkdir(directory, { recursive: true });
+    const filename = path.join(directory, `tandem-performance-${Date.now()}.txt`);
+    await fs.promises.writeFile(filename, text, { encoding: 'utf8', mode: 0o600 });
+    logger?.record('action', { action: 'Сохранён текстовый отчёт об отклике и качестве' });
+    shell.showItemInFolder(filename); return filename;
   });
   ipcMain.handle('load-settings', event => { trusted(event); return local.settings(); });
   ipcMain.handle('save-settings', (event, value) => { trusted(event); return local.settings(value); });

@@ -12,3 +12,5 @@
 .friends-grid{display:grid;grid-template-columns:minmax(280px,1fr) minmax(400px,1.5fr);gap:24px}.friend-card{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #39323f;border-radius:10px;padding:14px;margin:12px 0}.friend-card strong,.friend-card small{display:block}.friend-card small{color:#a49eae;font-size:11px;margin-top:5px}.friend-actions{display:flex;gap:6px;flex-wrap:wrap}.friend-actions .button{font-size:11px;padding:8px}.friend-card .button{margin:0}.settings-panel h2:not(:first-child){margin-top:26px}details{border:1px solid #39323f;padding:12px;border-radius:8px;margin:14px 0}summary{cursor:pointer;font-size:12px;color:var(--accent)}#auto-status{font-size:12px;line-height:1.7;padding:12px 15px;margin-top:12px;border:1px solid #39323f;border-radius:8px;overflow-wrap:anywhere}#data-directory{overflow-wrap:anywhere}@media(max-width:1150px){.friends-grid{grid-template-columns:1fr}.friend-card{flex-wrap:wrap}}
 
 #log-path{overflow-wrap:anywhere}
+
+#performance-advice{white-space:pre-line;line-height:1.7}#route-result{overflow-wrap:anywhere}

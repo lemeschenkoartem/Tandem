@@ -42,3 +42,12 @@ test('unknown and reset counters do not invent loss/latency; interval statistics
   reports.get('v').id = 'other'; assert.equal(measure(reports, 'viewer', next.snapshot).sample.valid, false);
   assert.equal(receiverFeedback({ processingMs: Infinity, jitterMs: -2, lossPct: '50' }).decodeMs, null);
 });
+
+test('sustained H264 compression at the rate ceiling lowers FPS and holds recovery; other codecs do not share its QP threshold',()=>{
+ const controller=new Controller({...ceiling,resolution:'1920x1080',bitrate:50}); controller.current={...controller.current,fps:120,bitrate:50};
+ feed(controller,{...good,codec:'H264',qp:40,fps:120},1000,14000);
+ assert.equal(controller.current.fps,90); assert.match(controller.reason,/Сильное сжатие/);
+ feed(controller,{...good,codec:'H264',qp:20,fps:90},15000,29000); assert.equal(controller.current.fps,90);
+ const other=new Controller({...ceiling,resolution:'1920x1080',bitrate:50}); other.current={...other.current,fps:120,bitrate:50};
+ feed(other,{...good,codec:'AV1',qp:140,fps:120},1000,20000); assert.equal(other.current.fps,120);
+});

@@ -32,6 +32,9 @@
     const protocol = local?.protocol || remote?.protocol || 'unknown';
     const relay = local?.candidateType === 'relay' || remote?.candidateType === 'relay';
     const dropped = valid ? delta(video.framesDropped, old.framesDropped) : null;
+    const vpn = ip => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip || '') || /^fd7a:115c:a1e0:/i.test(ip || '') ? 'tailscale' : /^26\./.test(ip || '') ? 'radmin' : null;
+    const network = vpn(local?.address) || vpn(remote?.address) || 'other';
+    const turnProtocol = local?.relayProtocol || remote?.relayProtocol || null;
     return { snapshot, sample: {
       valid, fps: number(video.framesPerSecond, 1000) ?? (valid ? count / elapsed : null),
       actualMbps: valid ? (snapshot.bytes - old.bytes) * 8 / elapsed / 1e6 : null,
@@ -40,11 +43,18 @@
       lossPct: loss, processingMs: valid ? perFrame(snapshot.processing, old.processing, count) : null,
       jitterMs: !sending && valid ? perFrame(video.jitterBufferDelay, old.jitterBufferDelay, delta(video.jitterBufferEmittedCount, old.jitterBufferEmittedCount)) : null,
       sendDelayMs: sending && valid ? perFrame(video.totalPacketSendDelay, old.totalPacketSendDelay, delta(video.packetsSent, old.packetsSent)) : null,
+      qp: valid && count > 0 && delta(video.qpSum, old.qpSum) !== null ? (video.qpSum - old.qpSum) / count : null,
+      jitterMinimumMs: !sending && valid ? perFrame(video.jitterBufferMinimumDelay, old.jitterBufferMinimumDelay, delta(video.jitterBufferEmittedCount, old.jitterBufferEmittedCount)) : null,
+      jitterTargetMs: !sending && valid ? perFrame(video.jitterBufferTargetDelay, old.jitterBufferTargetDelay, delta(video.jitterBufferEmittedCount, old.jitterBufferEmittedCount)) : null,
+      retransmitMbps: sending && valid && delta(video.retransmittedBytesSent, old.retransmittedBytesSent) !== null ? (video.retransmittedBytesSent - old.retransmittedBytesSent) * 8 / elapsed / 1e6 : null,
+      freezeCount: !sending && valid ? delta(video.freezeCount, old.freezeCount) : null,
+      nackCount: valid ? delta(video.nackCount, old.nackCount) : null,
       droppedPct: dropped !== null && count + dropped > 0 ? 100 * dropped / (count + dropped) : null,
       limitation: video.qualityLimitationReason || 'none', hardware: (sending ? video.powerEfficientEncoder : video.powerEfficientDecoder) ?? null,
       codec: reports.get(video.codecId)?.mimeType?.split('/')[1] || '', implementation: video.encoderImplementation || video.decoderImplementation || '',
       width: video.frameWidth || 0, height: video.frameHeight || 0,
-      routeId: pair?.id || '', route: relay ? `TURN · ${local?.relayProtocol || remote?.relayProtocol || protocol}` : `P2P · ${protocol}`,
+      path: { relay, rtcProtocol: protocol, turnProtocol, network, peerAddress: remote?.address || null },
+      routeId: pair?.id || '', route: `${relay ? `TURN · ${turnProtocol || protocol}` : `P2P · ${protocol}`}${network === 'tailscale' ? ' · Tailscale (внешний путь ещё не проверен)' : network === 'radmin' ? ' · Radmin VPN' : ''}`,
     } };
   }
   function receiverFeedback(value) {
@@ -68,6 +78,7 @@
       this.current = { ...this.ceiling, resolution: sizes[Math.min(sizes.indexOf(this.ceiling.resolution), Math.max(this.floor, 1))], fps: Math.min(60, this.ceiling.fps), bitrate: Math.min(30, ceiling.bitrate), codec: ceiling.codec === 'auto' ? 'H264' : ceiling.codec };
       this.started = now; this.changed = now; this.formatChanged = now; this.goodSince = null; this.badSince = null;
       this.networkBad = 0; this.hardwareBad = 0; this.baseline = null; this.routeId = null; this.jitterBaseline = null; this.sendBaseline = null;
+      this.compressionBad = 0; this.clarityHoldUntil = 0;
       this.reason = 'Проверяем сеть и обработку кадров; затем повышаем качество';
     }
     update(sample, receiver, now) {
@@ -88,6 +99,8 @@
       const networkSlow = loss > 2 || inflation > 18 || queueGrowth > 15 || jitterGrowth > 25 || (bandwidth > 0 && bandwidth < this.current.bitrate * 0.8 && sample.actualMbps > bandwidth * 0.7);
       this.networkBad = networkSlow ? this.networkBad + 1 : 0;
       this.hardwareBad = encodingSlow || decodingSlow ? this.hardwareBad + 1 : 0;
+      const compressed = sample.codec?.toUpperCase() === 'H264' && sample.qp >= 35 && sample.fps >= this.current.fps * 0.75;
+      this.compressionBad = compressed ? this.compressionBad + 1 : 0;
       const bad = networkSlow || encodingSlow || decodingSlow;
       if (bad) { this.goodSince = null; this.badSince ??= now; } else { this.badSince = null; this.goodSince ??= now; }
       if (now - this.started < 2500 || now - this.changed < 2000) return null;
@@ -107,10 +120,13 @@
         reason = decodingSlow ? 'ПК друга не успевает декодировать кадры' : 'Хост не успевает кодировать кадры';
         if (next.codec !== 'H264' && this.ceiling.codec === 'auto') { next.codec = 'H264'; reason += ': возвращаем H.264'; }
         if (next.resolution === this.current.resolution && next.fps === this.current.fps && next.codec === this.current.codec) reason += '; достигнут выбранный минимум разрешения';
+      } else if (!bad && this.compressionBad >= 5 && next.fps > 60 && now - this.formatChanged >= 10000 && next.bitrate >= Math.min(this.ceiling.bitrate, bandwidth > 0 ? bandwidth * 0.85 : this.ceiling.bitrate) * 0.9) {
+        next.fps = rates[rates.indexOf(next.fps) - 1];
+        reason = 'Сильное сжатие H.264: уменьшаем FPS, чтобы сохранить больше деталей в движении';
       } else if (!bad && this.goodSince !== null && now - this.goodSince >= 8000 && now - this.changed >= 3000) {
         const safeRate = Math.min(this.ceiling.bitrate, bandwidth > 0 ? bandwidth * 0.85 : this.ceiling.bitrate);
         if (next.bitrate < safeRate - 0.5) { next.bitrate = Math.min(safeRate, next.bitrate * 1.12 + 0.5); reason = 'Связь стабильна: повышаем чёткость'; }
-        if (now - this.formatChanged >= 12000 && now - this.goodSince >= 12000) {
+        if (now - this.formatChanged >= 12000 && now - this.goodSince >= 12000 && now >= this.clarityHoldUntil && !compressed) {
           const candidate = { ...next };
           if (candidate.fps < this.ceiling.fps) candidate.fps = rates[rates.indexOf(candidate.fps) + 1];
           else if (sizes.indexOf(candidate.resolution) < sizes.indexOf(this.ceiling.resolution)) candidate.resolution = sizes[sizes.indexOf(candidate.resolution) + 1];
@@ -126,6 +142,7 @@
     }
     // Call only after applyConstraints and setParameters succeed.
     commit(change) {
+      if (change.reason.startsWith('Сильное сжатие')) this.clarityHoldUntil = change.at + 30000;
       if (change.profile.resolution !== this.current.resolution || change.profile.fps !== this.current.fps) this.formatChanged = change.at;
       this.current = { ...change.profile }; this.changed = change.at; this.reason = change.reason;
     }

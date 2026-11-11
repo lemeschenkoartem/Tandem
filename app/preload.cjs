@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('tandem', {
   environment: () => ipcRenderer.invoke('environment'),
   logEvent: (event, data) => ipcRenderer.invoke('log-event', event, data),
   openLog: () => ipcRenderer.invoke('open-log'),
+  probeTailscale: ip => ipcRenderer.invoke('probe-tailscale', ip),
+  savePerformanceReport: text => ipcRenderer.invoke('save-performance-report', text),
   loadSettings: () => ipcRenderer.invoke('load-settings'),
   saveSettings: value => ipcRenderer.invoke('save-settings', value),
   loadContacts: (network, id) => ipcRenderer.invoke('load-contacts', network, id),
